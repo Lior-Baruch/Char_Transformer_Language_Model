@@ -1,5 +1,5 @@
 # Char_Transformer_Language_Model
-README
+
 This code is an implementation of a character-level language model using a transformer architecture in PyTorch. The model is trained on a dataset of text and generates new text by predicting the next character given a sequence of previous characters. The code is implemented in such a way that it can be trained on any dataset of text.
 
 Dependencies
