@@ -31,5 +31,5 @@ model: an instance of the BigramLanguageModel class.
 model_device: the model instance moved to the device (CPU or GPU) specified by the device variable.
 optimizer: a PyTorch optimizer (AdamW) used to optimize the parameters of the model.
 batch_size, block_size, max_iters, eval_interval, learning_rate, device, eval_iters, save_interval, n_embd, n_head, n_layer, dropout: hyperparameters used in the model.
-Usage
+# Usage
 To use this code, simply run the Python script. The script will train the model on the input text file (input.txt) and print the train and validation losses every eval_interval iterations. Once training is complete, the script will generate a sequence of characters using the trained model and print it to the console. The generated sequence can be modified by changing the max_new_tokens parameter passed to the generate function.
