@@ -1,30 +1,35 @@
-# Char_Transformer_Language_Model
+# Char Transformer Language Model - Bigram Language Model
+This code implements a Bigram Language Model using a transformer architecture. A Bigram Language Model predicts the next character in a sequence of characters given the previous character. The transformer architecture used in this code consists of a stack of n_layer Transformer Blocks, each of which contains a multi-head self-attention mechanism followed by a feed-forward neural network.
 
-This code is an implementation of a character-level language model using a transformer architecture in PyTorch. The model is trained on a dataset of text and generates new text by predicting the next character given a sequence of previous characters. The code is implemented in such a way that it can be trained on any dataset of text.
+# Classes
+**Head**
+One head of self-attention. Computes the attention scores and performs the weighted aggregation of the values.
 
-Dependencies:
-PyTorch
-torch
-torch.nn
-torch.nn.functional
-Data
-The code expects to find a file called input.txt in the same directory as the code. This file should contain the dataset of text that the model will be trained on. The file should contain plain text, with no formatting.
+**MultiHeadAttention**
+Multiple heads of self-attention in parallel.
 
-Usage:
-Prepare the dataset and put it in a file named input.txt in the same directory as the code.
-Run the code, it will use the input.txt file as the dataset for training.
+**FeedForward**
+A simple linear layer followed by a non-linearity.
 
-Hyperparameters:
-The code includes several hyperparameters that can be adjusted to control the training process and the final performance of the model:
+**TransformerBlock**
+Transformer block: communication followed by computation.
 
-batch_size: the number of sequences to train on at once, also known as B.
-block_size: how long each context sequence is, also known as T.
-max_iters: number of iterations to run the training loop.
-eval_interval: how often to evaluate the model during training.
-learning_rate: the learning rate for the optimizer.
-eval_iters: the number of iterations to run when evaluating the model.
-save_interval: how often to save the model during training.
-n_embd: the embedding dimension, also known as hidden size or C.
-n_head: the number of heads, also known as H.
-n_layer: the number of layers, also known as L.
-dropout: the dropout rate, also known as D.
+**BigramLanguageModel**
+A simple bigram language model, used to initialize the parameters of the transformer. Consists of the following components:
+
+token_embedding_table: a lookup table for token embeddings.
+position_embedding_table: a lookup table for position embeddings.
+TransformerBlocks: a stack of n_layer Transformer Blocks.
+ln_f: a layer normalization layer for the input of the final linear layer.
+lm_head: the final linear layer.
+# Other Functions and Variables
+encode(s): encodes a string s into a list of integers using the char_to_int dictionary.
+decode(l): decodes a list of integers l into a string using the int_to_char dictionary.
+get_batch(split): generates a small batch of data of inputs x and targets y for a given split (train or validation).
+estimate_loss(): estimates the loss on the train and validation sets using a fixed number of evaluation iterations (eval_iters).
+model: an instance of the BigramLanguageModel class.
+model_device: the model instance moved to the device (CPU or GPU) specified by the device variable.
+optimizer: a PyTorch optimizer (AdamW) used to optimize the parameters of the model.
+batch_size, block_size, max_iters, eval_interval, learning_rate, device, eval_iters, save_interval, n_embd, n_head, n_layer, dropout: hyperparameters used in the model.
+Usage
+To use this code, simply run the Python script. The script will train the model on the input text file (input.txt) and print the train and validation losses every eval_interval iterations. Once training is complete, the script will generate a sequence of characters using the trained model and print it to the console. The generated sequence can be modified by changing the max_new_tokens parameter passed to the generate function.
