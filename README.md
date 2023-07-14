@@ -1,35 +1,55 @@
-# Char Transformer Language Model - Bigram Language Model
-This code implements a Bigram Language Model using a transformer architecture. A Bigram Language Model predicts the next character in a sequence of characters given the previous character. The transformer architecture used in this code consists of a stack of n_layer Transformer Blocks, each of which contains a multi-head self-attention mechanism followed by a feed-forward neural network.
+# Character-Level Transformer Language Model - Bigram Language Model
 
-# Classes
-**Head**
-One head of self-attention. Computes the attention scores and performs the weighted aggregation of the values.
+This repository contains an implementation of a Bigram Language Model using a transformer architecture. This character-level language model aims to predict the next character in a sequence given the previous characters. The model is built and trained using the PyTorch library.
 
-**MultiHeadAttention**
-Multiple heads of self-attention in parallel.
+## Dependencies
 
-**FeedForward**
-A simple linear layer followed by a non-linearity.
+To run the notebook, you'll need the following Python libraries:
 
-**TransformerBlock**
-Transformer block: communication followed by computation.
+- PyTorch
+- Torchvision
+- Torchaudio
 
-**BigramLanguageModel**
-A simple bigram language model, used to initialize the parameters of the transformer. Consists of the following components:
+The code is designed to utilize a GPU if available. If not, it will default to a CPU.
 
-token_embedding_table: a lookup table for token embeddings.
-position_embedding_table: a lookup table for position embeddings.
-TransformerBlocks: a stack of n_layer Transformer Blocks.
-ln_f: a layer normalization layer for the input of the final linear layer.
-lm_head: the final linear layer.
-# Other Functions and Variables
-encode(s): encodes a string s into a list of integers using the char_to_int dictionary.
-decode(l): decodes a list of integers l into a string using the int_to_char dictionary.
-get_batch(split): generates a small batch of data of inputs x and targets y for a given split (train or validation).
-estimate_loss(): estimates the loss on the train and validation sets using a fixed number of evaluation iterations (eval_iters).
-model: an instance of the BigramLanguageModel class.
-model_device: the model instance moved to the device (CPU or GPU) specified by the device variable.
-optimizer: a PyTorch optimizer (AdamW) used to optimize the parameters of the model.
-batch_size, block_size, max_iters, eval_interval, learning_rate, device, eval_iters, save_interval, n_embd, n_head, n_layer, dropout: hyperparameters used in the model.
-# Usage
-To use this code, simply run the Python script. The script will train the model on the input text file (input.txt) and print the train and validation losses every eval_interval iterations. Once training is complete, the script will generate a sequence of characters using the trained model and print it to the console. The generated sequence can be modified by changing the max_new_tokens parameter passed to the generate function.
+## Data
+
+The model is trained on a text file containing the works of Shakespeare. The text is loaded from the file as a long string. The unique characters in the text are identified, and a mapping from characters to integers (and vice versa) is created. This mapping is used to encode the text into a format that the model can understand.
+
+The data is then split into a training set (90% of the data) and a validation set (10% of the data). The training set is used to train the model, and the validation set is used to monitor the model's performance during training.
+
+## Model
+
+The transformer model consists of several key components, each implemented as a separate Python class:
+
+- **Head**: This class represents a single head of the self-attention mechanism. It computes attention scores and performs the weighted aggregation of values.
+
+- **MultiHeadAttention**: This class manages multiple instances of the `Head` class in parallel, allowing the model to capture different types of information from the input data.
+
+- **FeedForward**: This class represents a feed-forward network that consists of a simple linear layer followed by a ReLU non-linearity.
+
+- **TransformerBlock**: Each Transformer Block contains a self-attention mechanism followed by a feed-forward network.
+
+- **BigramLanguageModel**: This class represents the main model. It includes an embedding layer, a series of transformer blocks, a layer normalization layer, and a final linear layer.
+
+## Training
+
+The model is trained using the AdamW optimizer with a learning rate of 3e-4. The training process involves forward propagation, loss computation, backpropagation, and parameter update steps. The cross-entropy loss function is used to calculate the loss between the model's predictions and the actual characters. The training and validation losses are printed out every 500 iterations, allowing you to monitor the model's progress during training. 
+
+After training, the model's state is saved to a file for future use.
+
+## Text Generation
+
+Once trained, the model can be used to generate new text. The model takes a sequence of characters (the context) and generates the next character. This process is repeated to generate a sequence of new characters.
+
+## Usage
+
+You can run the provided Jupyter notebook to train the model and generate new text. The hyperparameters can be adjusted to fine-tune the model's performance and the amount of text generated.
+
+## Future Work
+
+Improvements to the model could include adjusting the hyperparameters, adding more transformer blocks, training on a larger dataset, or training for more iterations. 
+
+## License
+
+This project is open source and available under the [MIT License](LICENSE).
