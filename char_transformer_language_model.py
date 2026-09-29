@@ -5,12 +5,13 @@ from torch.nn import functional as F
 # hyperparameters
 batch_size = 64  # how many sequences to train on at once, also known as B
 block_size = 256  # how long each context sequence is, also known as T
-max_iters = 1000
+max_iters = 5000
 eval_interval = 500  # how often to evaluate the model
 learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
-save_interval = 1000  # how often to save the model
+checkpoint_path = 'char_transformer_language_model.pt'  # where the best model (lowest val loss) is saved
+patience = 3  # stop early after this many evaluations without val loss improvement
 n_embd = 384  # embedding dimension, also known as hidden size or C
 n_head = 6  # number of heads, also known as H
 n_layer = 6  # number of layers, also known as L
@@ -103,7 +104,7 @@ class Head(nn.Module):
         v = self.value(x)
 
         # compute attention scores ("affinities"), (B, T, H) @ (B, H, T) -> (B, T, T)
-        wei = q @ k.transpose(-2, -1) * C ** -0.5  # attention scores
+        wei = q @ k.transpose(-2, -1) * k.shape[-1] ** -0.5  # attention scores, scaled by 1/sqrt(head_size)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))  # masking trick, future is masked
         wei = F.softmax(wei, dim=-1)  # softmax to get the weights
         wei = self.dropout(wei)  # dropout, to prevent over-fitting
@@ -168,12 +169,12 @@ class TransformerBlock(nn.Module):
         return x
 
 
-class BigramLanguageModel(nn.Module):
-    """ a simple bigram language model, it is used to initialize the parameters of the transformer """
+class CharTransformerLanguageModel(nn.Module):
+    """ a GPT-style (decoder-only) transformer that predicts the next character from the previous ones """
 
     def __init__(self):
         super().__init__()
-        # each token directly reads off the logits for the next token from a lookup table
+        # each character and each position gets a learned embedding vector
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)  # token embedding table, (V,C)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)  # position embedding table, (T,C)
         self.TransformerBlocks = nn.Sequential(
@@ -222,7 +223,7 @@ class BigramLanguageModel(nn.Module):
         return idx
 
 
-model = BigramLanguageModel()
+model = CharTransformerLanguageModel()
 model_device = model.to(device)
 
 # print the number of parameters in the model
@@ -232,11 +233,24 @@ print(sum(p.numel() for p in model_device.parameters()) / 1e6, 'M parameters')
 optimizer = torch.optim.AdamW(model_device.parameters(), lr=learning_rate)
 
 # train the model
+best_val_loss = float('inf')
+evals_without_improvement = 0
 for iter in range(max_iters):
     # every once in a while evaluate the loss on train and val sets
     if iter % eval_interval == 0 or iter == max_iters - 1:
         losses = estimate_loss()
         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+
+        # keep the model with the lowest val loss, and stop once it stops improving
+        if losses['val'] < best_val_loss:
+            best_val_loss = losses['val']
+            evals_without_improvement = 0
+            torch.save(model_device.state_dict(), checkpoint_path)
+        else:
+            evals_without_improvement += 1
+            if evals_without_improvement >= patience:
+                print(f"early stopping: val loss has not improved for {patience} evaluations")
+                break
 
     # sample a batch of data
     xb, yb = get_batch('train')
@@ -246,6 +260,10 @@ for iter in range(max_iters):
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
+
+# restore the best model before generating
+model_device.load_state_dict(torch.load(checkpoint_path, map_location=device))
+print(f"loaded best model (val loss {best_val_loss:.4f}) from {checkpoint_path}")
 
 # generate from the model
 context = torch.zeros((1, 1), dtype=torch.long, device=device)

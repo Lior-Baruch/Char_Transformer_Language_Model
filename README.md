@@ -1,20 +1,16 @@
-# Character-Level Transformer Language Model - Bigram Language Model
+# Character-Level Transformer Language Model
 
-This repository contains an implementation of a Bigram Language Model using a transformer architecture. This character-level language model aims to predict the next character in a sequence given the previous characters. The model is built and trained using the PyTorch library.
+This repository contains an implementation of a GPT-style (decoder-only) transformer language model. This character-level language model aims to predict the next character in a sequence given the previous characters. The model is built and trained using the PyTorch library.
 
 ## Dependencies
 
-To run the notebook, you'll need the following Python libraries:
-
-- PyTorch
-- Torchvision
-- Torchaudio
+The only dependency is [PyTorch](https://pytorch.org/).
 
 The code is designed to utilize a GPU if available. If not, it will default to a CPU.
 
 ## Data
 
-The model is trained on a text file containing the works of Shakespeare. The text is loaded from the file as a long string. The unique characters in the text are identified, and a mapping from characters to integers (and vice versa) is created. This mapping is used to encode the text into a format that the model can understand.
+The model is trained on `input.txt`, a text file containing the works of Shakespeare. The text is loaded from the file as a long string. The unique characters in the text are identified, and a mapping from characters to integers (and vice versa) is created. This mapping is used to encode the text into a format that the model can understand.
 
 The data is then split into a training set (90% of the data) and a validation set (10% of the data). The training set is used to train the model, and the validation set is used to monitor the model's performance during training.
 
@@ -26,17 +22,17 @@ The transformer model consists of several key components, each implemented as a 
 
 - **MultiHeadAttention**: This class manages multiple instances of the `Head` class in parallel, allowing the model to capture different types of information from the input data.
 
-- **FeedForward**: This class represents a feed-forward network that consists of a simple linear layer followed by a ReLU non-linearity.
+- **FeedForward**: This class represents a feed-forward network: a linear layer that expands the embedding 4x, a ReLU non-linearity, and a linear layer that projects back down.
 
 - **TransformerBlock**: Each Transformer Block contains a self-attention mechanism followed by a feed-forward network.
 
-- **BigramLanguageModel**: This class represents the main model. It includes an embedding layer, a series of transformer blocks, a layer normalization layer, and a final linear layer.
+- **CharTransformerLanguageModel**: This class represents the main model. It includes token and position embeddings, a series of transformer blocks, a layer normalization layer, and a final linear layer.
 
 ## Training
 
 The model is trained using the AdamW optimizer with a learning rate of 3e-4. The training process involves forward propagation, loss computation, backpropagation, and parameter update steps. The cross-entropy loss function is used to calculate the loss between the model's predictions and the actual characters. The training and validation losses are printed out every 500 iterations, allowing you to monitor the model's progress during training. 
 
-After training, the model's state is saved to a file for future use.
+Whenever the validation loss reaches a new low, the model's state is saved to `char_transformer_language_model.pt`. Training stops early if the validation loss has not improved for 3 evaluations in a row (`patience`), and the best saved model is restored before generating text.
 
 ## Text Generation
 
@@ -44,7 +40,13 @@ Once trained, the model can be used to generate new text. The model takes a sequ
 
 ## Usage
 
-You can run the provided Jupyter notebook to train the model and generate new text. The hyperparameters can be adjusted to fine-tune the model's performance and the amount of text generated.
+Run the script from the repository root to train the model and generate new text:
+
+```bash
+python char_transformer_language_model.py
+```
+
+You can also run the provided Jupyter notebook, which contains the same code split into cells. The hyperparameters can be adjusted to fine-tune the model's performance and the amount of text generated.
 
 ## Future Work
 

@@ -1,0 +1,2 @@
+# model checkpoints saved during training
+*.pt
