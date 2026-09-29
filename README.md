@@ -53,7 +53,7 @@ python -m charlm grpo --config configs/example/grpo.json --set kl_coef=0 group_s
 python -m charlm pretrain --config configs/example/pretrain.json --set model.n_layer=6 --print-config
 ```
 
-Each run writes a checkpoint (`out_path`) and its metrics as JSON lines next to it (`*.metrics.jsonl`), ready for plotting and comparing runs. `configs/pretrain_gpu.json` is the original 10.8M-parameter model, for use on a GPU.
+Each run writes a checkpoint (`out_path`) and its metrics as JSON lines next to it (`*.metrics.jsonl`), ready for plotting and comparing runs. Every stage also saves its full training state at each evaluation (`*.state.pt`, deleted when the run finishes). If a run is interrupted, run the same command with `--set resume=true`; it continues exactly where it left off. `configs/pretrain_gpu.json` is the original 10.8M-parameter model, for use on a GPU.
 
 ## Results of the example models
 
@@ -101,7 +101,6 @@ Attention is scaled by 1/sqrt(head_size).
 - The last 10% of the text is held out as validation data.
 - The learning rate follows a linear warmup, then a cosine decay.
 - The checkpoint with the lowest validation loss is kept, and training stops early once the validation loss stops improving.
-- Every evaluation also saves the optimizer and random-number state to `*.state.pt`. If a run is interrupted, run the same command with `--set resume=true`; it continues exactly where it left off.
 
 ### 2. Supervised fine-tuning (`charlm/sft.py`)
 

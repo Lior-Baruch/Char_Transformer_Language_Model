@@ -22,6 +22,7 @@ class TrainConfig:
     eval_interval: int = 250  # how often to evaluate
     seed: int = 1337
     device: str = "auto"  # auto, cpu, cuda or mps
+    resume: bool = False  # continue an interrupted run from its last evaluation (saved in *.state.pt)
 
 
 def resolve_device(name="auto"):
@@ -68,6 +69,49 @@ def optimizer_step(model, optimizer, loss, it, cfg):
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
     optimizer.step()
     return lr
+
+
+def state_path(out_path):
+    """ checkpoints/sft.pt -> checkpoints/sft.state.pt """
+    return os.path.splitext(out_path)[0] + '.state.pt'
+
+
+def save_state(out_path, model, optimizer, it, **extra):
+    """ everything needed to continue a run from iteration it: weights, optimizer, random-number generators and
+    any stage-specific values (a random.Random in extra is stored by its state) """
+    extra = {k: ('py_rng', v.getstate()) if isinstance(v, random.Random) else v for k, v in extra.items()}
+    torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'torch_rng': torch.get_rng_state(),
+                'iter': it, 'extra': extra}, state_path(out_path))
+
+
+def load_state(out_path, model, optimizer, device, **rngs):
+    """ restore a run saved by save_state; random.Random objects passed in rngs get their saved state back.
+    returns (iteration to continue from, the other extra values), or (0, None) when there is nothing to resume """
+    path = state_path(out_path)
+    if not os.path.exists(path):
+        return 0, None
+    state = torch.load(path, map_location=device, weights_only=True)
+    model.load_state_dict(state['model'])
+    optimizer.load_state_dict(state['optimizer'])
+    torch.set_rng_state(state['torch_rng'].cpu())
+    extra = {}
+    for k, v in state['extra'].items():
+        if isinstance(v, (tuple, list)) and len(v) == 2 and v[0] == 'py_rng':
+            rngs[k].setstate(_to_tuple(v[1]))
+        else:
+            extra[k] = v
+    print(f"resuming from iteration {state['iter']}")
+    return state['iter'], extra
+
+
+def _to_tuple(x):
+    return tuple(_to_tuple(i) for i in x) if isinstance(x, (tuple, list)) else x
+
+
+def clear_state(out_path):
+    """ a finished run has nothing left to resume """
+    if os.path.exists(state_path(out_path)):
+        os.remove(state_path(out_path))
 
 
 def metrics_path(out_path):

@@ -15,8 +15,8 @@ from .config import to_dict
 from .data import load_text, pad_batch, read_jsonl
 from .evaluation import evaluate_tasks
 from .tasks import ALL_TASKS, VERIFIABLE_TASKS, TaskSuite
-from .training import (MetricsLogger, TrainConfig, make_optimizer, metrics_path, optimizer_step, resolve_device,
-                       set_seed)
+from .training import (MetricsLogger, TrainConfig, clear_state, load_state, make_optimizer, metrics_path,
+                       optimizer_step, resolve_device, save_state, set_seed)
 
 
 @dataclass
@@ -89,10 +89,13 @@ def sft(cfg):
 
     rng = random.Random(cfg.seed)
     optimizer = make_optimizer(model, cfg)
-    logger = MetricsLogger(metrics_path(cfg.out_path))
     best_val_loss, evals_without_improvement, train_losses = float('inf'), 0, []
-    for it in range(cfg.max_iters):
-        if it % cfg.eval_interval == 0 or it == cfg.max_iters - 1:
+    start_iter, state = load_state(cfg.out_path, model, optimizer, device, rng=rng) if cfg.resume else (0, None)
+    if state is not None:
+        best_val_loss, evals_without_improvement = state['best_val_loss'], state['evals_without_improvement']
+    logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None)
+    for it in range(start_iter, cfg.max_iters):
+        if (it % cfg.eval_interval == 0 or it == cfg.max_iters - 1) and not (state is not None and it == start_iter):
             metrics = {'val_loss': dataset_loss(model, val, cfg.batch_size, tokenizer.pad_id, device)}
             if train_losses:
                 metrics['train_loss'] = sum(train_losses) / len(train_losses)
@@ -109,12 +112,15 @@ def sft(cfg):
                 if cfg.patience and evals_without_improvement >= cfg.patience:
                     print(f"early stopping: val loss has not improved for {cfg.patience} evaluations")
                     break
+            save_state(cfg.out_path, model, optimizer, it, rng=rng, best_val_loss=best_val_loss,
+                       evals_without_improvement=evals_without_improvement)
 
         x, y = pad_batch([rng.choice(train) for _ in range(cfg.batch_size)], tokenizer.pad_id, device)
         _, loss = model(x, y)
         optimizer_step(model, optimizer, loss, it, cfg)
         train_losses.append(loss.item())
 
+    clear_state(cfg.out_path)
     model, tokenizer, _ = load_checkpoint(cfg.out_path, device)
     print(f"saved best model (val loss {best_val_loss:.4f}) to {cfg.out_path}")
     show = suite.sample(8, cfg.tasks, 'eval', seed=cfg.seed + 2)

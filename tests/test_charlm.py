@@ -133,41 +133,54 @@ def test_tasks_are_correct_and_split():
     assert all(e.task == 'speak' for e in suite.sample(3, ['speak']))
 
 
-def test_resumed_pretraining_matches_uninterrupted_run(tmp_path, monkeypatch):
+@pytest.mark.parametrize('stage', ['pretrain', 'sft', 'dpo', 'grpo'])
+def test_resumed_run_matches_uninterrupted_run(stage, tmp_path, monkeypatch):
+    """ interrupt a run at step 5, resume it, and check it ends exactly like a run that was never interrupted """
     import importlib
     import json
-    pretrain_module = importlib.import_module('charlm.pretrain')  # the module, not the pretrain function
+    module = importlib.import_module(f'charlm.{stage}')  # the module, not the function of the same name
     corpus = tmp_path / 'corpus.txt'
-    corpus.write_text(open(CORPUS).read()[:50_000])
+    corpus.write_text(open(CORPUS).read()[:200_000])
+    common = ['device=cpu', 'max_iters=8', 'eval_interval=3']
+    tiny = ['model.n_embd=16', 'model.n_head=2', 'model.n_layer=1', 'model.block_size=64', 'batch_size=4',
+            'eval_iters=2', 'sample_tokens=0', f'data_path={corpus}']
+    finetune = [f'corpus_path={corpus}', 'eval_per_task=1', f'init_from={tmp_path / "base.pt"}']
+    if stage != 'pretrain':
+        pretrain(load_config(PretrainConfig, None, tiny + [f'out_path={tmp_path / "base.pt"}', 'max_iters=2']))
+    options = {'pretrain': tiny + ['patience=0'],
+               'sft': finetune + ['n_train=32', 'n_val=8', 'batch_size=4', 'patience=0'],
+               'dpo': finetune + ['n_pairs=12', 'batch_size=4'],
+               'grpo': finetune + ['batch_size=2', 'group_size=3', 'max_new_tokens=6']}[stage]
+    config_cls = {'pretrain': PretrainConfig, 'sft': SFTConfig, 'dpo': DPOConfig, 'grpo': GRPOConfig}[stage]
+    run = getattr(module, stage)
 
     def config(name, resume=False):
-        return load_config(PretrainConfig, None, [
-            f'data_path={corpus}', f'out_path={tmp_path / name}.pt', 'model.n_embd=16', 'model.n_head=2',
-            'model.n_layer=1', 'model.block_size=16', 'batch_size=4', 'max_iters=8', 'eval_interval=3',
-            'eval_iters=2', 'patience=0', 'device=cpu', 'sample_tokens=0', f'resume={json.dumps(resume)}'])
+        return load_config(config_cls, None, common + options + [f'out_path={tmp_path / name}.pt',
+                                                                  f'resume={json.dumps(resume)}'])
 
-    full, _ = pretrain(config('full'))
+    full, _ = run(config('full'))
 
-    real_step = pretrain_module.optimizer_step
+    real_step = module.optimizer_step
 
     def crash_at_step_5(model, optimizer, loss, it, cfg):
         if it == 5:
             raise KeyboardInterrupt
         return real_step(model, optimizer, loss, it, cfg)
 
-    monkeypatch.setattr(pretrain_module, 'optimizer_step', crash_at_step_5)
+    monkeypatch.setattr(module, 'optimizer_step', crash_at_step_5)
     with pytest.raises(KeyboardInterrupt):
-        pretrain(config('resumed'))
+        run(config('resumed'))
     assert (tmp_path / 'resumed.state.pt').exists()
-    monkeypatch.setattr(pretrain_module, 'optimizer_step', real_step)
-    resumed, _ = pretrain(config('resumed', resume=True))
+    monkeypatch.setattr(module, 'optimizer_step', real_step)
+    resumed, _ = run(config('resumed', resume=True))
 
     assert not (tmp_path / 'resumed.state.pt').exists()
     for a, b in zip(full.state_dict().values(), resumed.state_dict().values()):
         assert torch.equal(a, b)
     logs = [[{k: v for k, v in json.loads(line).items() if k != 'time'} for line in open(tmp_path / f'{n}.metrics.jsonl')]
             for n in ('full', 'resumed')]
-    assert logs[0] == logs[1] and [row['step'] for row in logs[0]] == [0, 3, 6, 7]
+    assert logs[0] == logs[1]
+    assert [row['step'] for row in logs[0]] == ([0, 3, 6, 7] if stage in ('pretrain', 'sft') else [0, 3, 6, 8])
 
 
 def test_full_pipeline(tmp_path):

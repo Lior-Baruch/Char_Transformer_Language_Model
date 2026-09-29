@@ -22,8 +22,8 @@ from .data import load_text, pad_batch
 from .evaluation import evaluate_tasks
 from .model import token_logprobs
 from .tasks import VERIFIABLE_TASKS, TaskSuite, score
-from .training import (MetricsLogger, TrainConfig, make_optimizer, metrics_path, optimizer_step, resolve_device,
-                       set_seed)
+from .training import (MetricsLogger, TrainConfig, clear_state, load_state, make_optimizer, metrics_path,
+                       optimizer_step, resolve_device, save_state, set_seed)
 
 
 @dataclass
@@ -87,10 +87,11 @@ def grpo(cfg):
 
     rng = random.Random(cfg.seed)
     optimizer = make_optimizer(model, cfg)
-    logger = MetricsLogger(metrics_path(cfg.out_path))
-    train_stats = []
-    for it in range(cfg.max_iters + 1):
-        if it % cfg.eval_interval == 0 or it == cfg.max_iters:
+    start_iter, state = load_state(cfg.out_path, model, optimizer, device, rng=rng) if cfg.resume else (0, None)
+    logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None)
+    train_stats, metrics = [], {}
+    for it in range(start_iter, cfg.max_iters + 1):
+        if (it % cfg.eval_interval == 0 or it == cfg.max_iters) and not (state is not None and it == start_iter):
             metrics = {}
             if train_stats:
                 for k in train_stats[0]:
@@ -99,6 +100,7 @@ def grpo(cfg):
             if eval_set:
                 metrics.update(evaluate_tasks(model, tokenizer, eval_set, cfg.max_new_tokens))
             logger.log(it, **metrics)
+            save_state(cfg.out_path, model, optimizer, it, rng=rng)
         if it == cfg.max_iters:
             break
 
@@ -133,5 +135,6 @@ def grpo(cfg):
 
     save_checkpoint(cfg.out_path, model, tokenizer, {'stage': 'grpo', 'iter': cfg.max_iters, **metrics,
                                                      'config': to_dict(cfg)})
+    clear_state(cfg.out_path)
     print(f"saved model to {cfg.out_path}")
     return model, tokenizer
