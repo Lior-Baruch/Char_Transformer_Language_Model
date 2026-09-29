@@ -15,7 +15,7 @@ data/input.txt ───────────▶ base model ─────�
 3. **Preference tuning (DPO).** The instruct model is trained on pairs of a correct answer and one of its own wrong answers.
 4. **Reinforcement learning (GRPO).** The instruct model samples several answers per prompt and is rewarded for the correct ones.
 
-Every stage runs on a laptop CPU. The example models in `checkpoints/example/` were trained that way in about an hour in total.
+Every stage runs on a laptop CPU. The example models in `checkpoints/example/` were trained that way in about 70 minutes in total, and each stage measurably improves on the one before (see [Results](#results-of-the-example-models)).
 
 ## Install
 
@@ -40,7 +40,7 @@ python -m charlm eval --model checkpoints/example/{sft,dpo,grpo}.pt --show 2
 Train the whole pipeline yourself (each stage reads the previous stage's checkpoint):
 
 ```bash
-python -m charlm pretrain --config configs/example/pretrain.json   # ~40 min on 4 CPU cores
+python -m charlm pretrain --config configs/example/pretrain.json   # ~35 min on 4 CPU cores
 python -m charlm sft      --config configs/example/sft.json
 python -m charlm dpo      --config configs/example/dpo.json
 python -m charlm grpo     --config configs/example/grpo.json
@@ -57,7 +57,42 @@ Each run writes a checkpoint (`out_path`) and its metrics as JSON lines next to 
 
 ## Results of the example models
 
-_The example models are being trained; their results will be added here._
+All four models have 1.84M parameters (192-dim embeddings, 4 layers, 4 heads, 128-character context). They were trained on 4 CPU cores in about 70 minutes: pretraining 33 min, SFT 15, DPO 10, GRPO 11. Accuracy on 500 held-out prompts per task:
+
+```bash
+python -m charlm eval --model checkpoints/example/{base,sft,dpo,grpo}.pt --n-per-task 500
+```
+
+| model | reverse | uppercase | spell | length | add | overall |
+|---|---|---|---|---|---|---|
+| `base.pt` | 0% | 0% | 0% | 0% | 0% | 0% |
+| `sft.pt` | 99.0% | 100% | 98.4% | 100% | 13.2% | 82.1% |
+| `dpo.pt` | 95.8% | 97.8% | 97.6% | 100% | 20.2% | 82.3% |
+| `grpo.pt` | 98.8% | 100% | 98.2% | 100% | **24.2%** | **84.2%** |
+
+**Base model.** Val loss 1.477, the same as the original 10.8M-parameter notebook model (1.478) with a sixth of the parameters. It writes Shakespeare and ignores instructions:
+
+```
+ROMEO:
+Still to us.
+
+First Musician:
+Ay, as I had not seen to-morrow?
+
+ANGELO:
+Beseech you, be not a love.
+```
+
+**SFT.** SFT teaches the chat format and solves the word tasks almost perfectly; "Reverse the word: shakespeare" → "eraepsekahs". It also keeps the Shakespeare: "Say a line as KING RICHARD III." → "Then I say, and so shall I stay."
+
+Addition is the hard task. The model gets the size of the answer right (first digit 92%, number of digits 98%), but its last digit is close to a random guess, so only 13% of its answers are exact. That leaves room for the next two stages.
+
+**DPO.** DPO raises addition from 13% to 20%, at a small cost on reverse and uppercase. This takes `nll_coef=1`. Plain DPO (`nll_coef=0`) made the model worse: overall 82% → 60%, addition 13% → 2%. The chosen and rejected answers differ by a single digit ("136" vs "132"), and DPO then pushes down the probability of both. Adding the next-token loss on the chosen answer, as in [RPO](https://arxiv.org/abs/2404.19733), prevents that. You can see it in `dpo.metrics.jsonl`: `train_chosen_reward` rises while `train_rejected_reward` falls.
+
+**GRPO.** GRPO raises addition from 13% to 24% without hurting the other tasks. Over training, the reward on sampled replies doubles (8% → 17%). Three choices mattered:
+- **It trains on addition only** (`"tasks": ["add"]`). The word tasks are already solved, so every reply in their groups gets the same reward and carries no learning signal. Trained on all tasks, only ~10% of groups had any signal, and addition didn't move (13.0%).
+- **Groups of 16 replies.** With this group size, ~70% of addition groups contain both right and wrong answers.
+- **A gentle update.** A higher learning rate (3e-4) with a weaker KL penalty (0.01) was unstable: the KL to the reference jumped to ~0.5 and the reward fell.
 
 ## Using it as a library
 
@@ -137,12 +172,13 @@ loss = -log sigmoid(beta * ((log π(chosen) - log π_ref(chosen)) - (log π(reje
 - `beta` limits how far the model can move away from the reference.
 - By default the pairs come from the model's own mistakes. The SFT model samples several replies per training prompt; for each prompt it got wrong at least once, the correct answer becomes "chosen" and a wrong reply becomes "rejected".
 - The pairs are saved to `*.pairs.jsonl`. You can also supply your own pairs with `data_path`.
+- `nll_coef` adds the ordinary next-token loss on the chosen reply. When chosen and rejected replies are nearly identical, plain DPO can lower the probability of both; this term keeps the chosen reply likely (see Results).
 
 ### 3b. GRPO (`charlm/grpo.py`)
 
 [Group Relative Policy Optimization](https://arxiv.org/abs/2402.03300) is reinforcement learning with a verifiable reward and no value network. Each step works like this:
 
-1. Sample `batch_size` training prompts and `group_size` replies to each, at temperature 1.
+1. Sample `batch_size` training prompts from `tasks` and `group_size` replies to each, at temperature 1.
 2. Reward each reply: 1 if it is correct, 0 if not.
 3. Compute each reply's advantage relative to its own group: `(reward - group mean) / group std`. If a group's replies are all right or all wrong, they carry no signal.
 4. Update the model with the PPO clipped objective on the reply tokens, plus a KL penalty (k3 estimator) that keeps it close to the reference model:
@@ -155,8 +191,9 @@ loss = -min(ratio * A, clip(ratio, 1 - eps, 1 + eps) * A) + kl_coef * KL(π || �
 
 - **Base model.** Scale the model or the context (`model.*`) and watch how the val loss and samples change. Or pretrain on your own text with `data_path`.
 - **SFT.** Train on less data (`n_train`), train on a subset of `tasks` and test on the others, or skip pretraining and see how much the base model helps.
-- **DPO.** Sweep `beta`. Or build the pairs from a different model than the one being trained (`data_path`).
-- **GRPO.** Sweep `kl_coef` (try 0), `group_size` and `temperature`, or set `updates_per_batch` > 1 so the clipping matters. Or add a task in `tasks.py` with its own reward.
+- **DPO.** Sweep `beta` and `nll_coef`. Or build the pairs from a different model than the one being trained (`data_path`).
+- **GRPO.** Sweep `kl_coef` (try 0), `group_size` and `temperature`, or set `updates_per_batch` > 1 so the clipping matters. Or give addition partial credit per correct digit, or add a task in `tasks.py` with its own reward.
+- **Chain the stages.** Run GRPO starting from the DPO model (`init_from`), or run DPO on pairs sampled from the GRPO model.
 
 ## Project layout
 
@@ -176,7 +213,7 @@ charlm/
   grpo.py         stage 3b
   cli.py          `python -m charlm ...`
 configs/          example configs for each stage
-checkpoints/example/   trained example models and their metrics
+checkpoints/example/   trained example models, their metrics and the DPO pairs
 data/input.txt    Tiny Shakespeare (1.1M characters)
 tests/            pytest suite, including a tiny end-to-end run of the pipeline
 char_transformer_language_model.ipynb   the original self-contained notebook walkthrough
