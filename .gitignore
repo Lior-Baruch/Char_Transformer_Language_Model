@@ -1,2 +1,6 @@
 # model checkpoints saved during training
 *.pt
+# except the example models
+!checkpoints/example/*.pt
+__pycache__/
+*.egg-info/

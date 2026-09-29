@@ -1,0 +1,64 @@
+"""The chat template and helpers to get replies from a model.
+
+A conversation turn is laid out as
+
+    <|user|>Reverse the word: love<|assistant|>evol<|end|>
+
+The model is trained (SFT) to write the reply after <|assistant|> and finish it with <|end|>.
+"""
+from collections import defaultdict
+
+import torch
+
+
+def format_prompt(tokenizer, prompt):
+    """ token ids of the prompt part: <|user|>{prompt}<|assistant|> """
+    return [tokenizer.user_id] + tokenizer.encode(prompt, allow_special=False) + [tokenizer.assistant_id]
+
+
+def encode_chat_example(tokenizer, prompt, response):
+    """ (inputs, targets) for next-token training where only the response and <|end|> are predicted;
+    the prompt positions get target -100 so they add nothing to the loss """
+    prompt_ids = format_prompt(tokenizer, prompt)
+    full = prompt_ids + tokenizer.encode(response, allow_special=False) + [tokenizer.end_id]
+    inputs, targets = full[:-1], full[1:]
+    targets = [-100] * (len(prompt_ids) - 1) + targets[len(prompt_ids) - 1:]
+    return inputs, targets
+
+
+def sample_replies(model, tokenizer, prompts, num_samples=1, max_new_tokens=64, temperature=1.0, top_k=None,
+                   max_batch=256):
+    """ for each prompt, num_samples replies as (reply token ids, reply text).
+    The token ids include the final <|end|> if the model produced one; the text never does.
+    Prompts of the same length are batched together, so no padding is needed. """
+    device = next(model.parameters()).device
+    encoded = [format_prompt(tokenizer, p) for p in prompts]
+    by_length = defaultdict(list)
+    for i, ids in enumerate(encoded):
+        by_length[len(ids)].append(i)
+
+    results = [None] * len(prompts)
+    rows_per_call = max(1, max_batch // num_samples)
+    for length, indices in by_length.items():
+        new_tokens = min(max_new_tokens, model.config.block_size - length)  # keep prompt + reply within the context
+        for start in range(0, len(indices), rows_per_call):
+            chunk = indices[start:start + rows_per_call]
+            x = torch.tensor([encoded[i] for i in chunk], dtype=torch.long, device=device)
+            x = x.repeat_interleave(num_samples, dim=0)
+            out = model.generate(x, new_tokens, temperature=temperature, top_k=top_k,
+                                 stop_token=tokenizer.end_id)[:, length:].tolist()
+            for j, i in enumerate(chunk):
+                results[i] = [_cut_reply(tokenizer, out[j * num_samples + s]) for s in range(num_samples)]
+    return results
+
+
+def _cut_reply(tokenizer, ids):
+    if tokenizer.end_id in ids:
+        ids = ids[:ids.index(tokenizer.end_id) + 1]
+        return ids, tokenizer.decode(ids[:-1])
+    return ids, tokenizer.decode(ids)
+
+
+def chat(model, tokenizer, prompt, max_new_tokens=64, temperature=0.0, top_k=None):
+    """ the model's reply to one message (greedy by default) """
+    return sample_replies(model, tokenizer, [prompt], 1, max_new_tokens, temperature, top_k)[0][0][1]
