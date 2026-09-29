@@ -14,7 +14,7 @@ from .checkpoint import load_checkpoint, save_checkpoint
 from .config import to_dict
 from .data import load_text, pad_batch, read_jsonl
 from .evaluation import evaluate_tasks
-from .tasks import ALL_TASKS, VERIFIABLE_TASKS, TaskSuite
+from .tasks import ALL_TASKS, TaskSuite
 from .training import (MetricsLogger, TrainConfig, clear_state, load_state, make_optimizer, metrics_path,
                        optimizer_step, resolve_device, save_state, set_seed)
 
@@ -83,8 +83,7 @@ def sft(cfg):
     train_pairs, val_pairs = load_sft_data(cfg, suite)
     train = encode_examples(tokenizer, train_pairs, model.config.block_size)
     val = encode_examples(tokenizer, val_pairs, model.config.block_size)
-    eval_tasks = [t for t in cfg.tasks if t in VERIFIABLE_TASKS]
-    eval_set = suite.eval_set(cfg.eval_per_task, eval_tasks) if cfg.eval_per_task and eval_tasks else []
+    eval_set = suite.eval_set(cfg.eval_per_task) if cfg.eval_per_task else []  # all tasks, not just trained ones
     print(f"device {device} | {len(train)} train / {len(val)} val examples | {len(eval_set)} eval prompts")
 
     rng = random.Random(cfg.seed)

@@ -7,6 +7,10 @@ relative to a frozen reference model (usually the SFT model) and lowers it for t
 
 beta controls how far the policy may move away from the reference. Without a preference dataset, pairs are
 built from the model's own mistakes: the correct answer is "chosen" and a wrong sampled reply is "rejected".
+
+When chosen and rejected replies are nearly identical (e.g. "136" vs "132"), DPO can lower the probability of
+both, and the model gets worse. nll_coef adds the usual next-token loss on the chosen reply (as in RPO,
+arXiv:2404.19733), which keeps the chosen reply likely while DPO pushes the rejected one down.
 """
 import os
 import random
@@ -40,6 +44,7 @@ class DPOConfig(TrainConfig):
     sample_temperature: float = 1.0
     val_fraction: float = 0.05  # part of the pairs held out for the val loss
     beta: float = 0.1
+    nll_coef: float = 0.0  # weight of an extra next-token loss on the chosen replies (0 = plain DPO)
     batch_size: int = 32  # pairs per step
     max_iters: int = 1000
     learning_rate: float = 5e-5
@@ -47,7 +52,7 @@ class DPOConfig(TrainConfig):
     warmup_iters: int = 20
     weight_decay: float = 0.0
     eval_interval: int = 100
-    eval_per_task: int = 50  # held-out examples per task for measuring accuracy (0 = skip)
+    eval_per_task: int = 50  # held-out examples per verifiable task for measuring accuracy (0 = skip)
     max_new_tokens: int = 32
     dropout: Optional[float] = 0.0  # dropout would make the log-probabilities noisy
 
@@ -153,7 +158,7 @@ def dpo(cfg):
     val, train = pairs[:n_val], pairs[n_val:]
     ref_chosen, ref_rejected = reference_logprobs(ref_model, pairs, tokenizer.pad_id, device)
     val_ref, train_ref = (ref_chosen[:n_val], ref_rejected[:n_val]), (ref_chosen[n_val:], ref_rejected[n_val:])
-    eval_set = suite.eval_set(cfg.eval_per_task, cfg.tasks) if cfg.eval_per_task else []
+    eval_set = suite.eval_set(cfg.eval_per_task) if cfg.eval_per_task else []  # all tasks, not just trained ones
     print(f"device {device} | {len(train)} train / {len(val)} val pairs | {len(eval_set)} eval prompts")
 
     rng = random.Random(cfg.seed)
@@ -176,10 +181,15 @@ def dpo(cfg):
             break
 
         idx = [rng.randrange(len(train)) for _ in range(cfg.batch_size)]
-        chosen, rejected = pair_logprobs(model, [train[i] for i in idx], tokenizer.pad_id, device)
+        batch = [train[i] for i in idx]
+        chosen, rejected = pair_logprobs(model, batch, tokenizer.pad_id, device)
         loss, stats = dpo_loss(chosen, rejected, train_ref[0][idx], train_ref[1][idx], cfg.beta)
+        if cfg.nll_coef:
+            n_tokens = torch.tensor([sum(t != -100 for t in c[1]) for c, _ in batch], device=device)
+            loss = loss + cfg.nll_coef * (-chosen / n_tokens).mean()  # mean next-token loss of the chosen replies
         optimizer_step(model, optimizer, loss, it, cfg)
-        train_stats.append({'loss': loss.item(), 'reward_acc': stats['reward_acc']})
+        train_stats.append({'loss': loss.item(), 'reward_acc': stats['reward_acc'],
+                            'chosen_reward': stats['chosen_reward'], 'rejected_reward': stats['rejected_reward']})
 
     save_checkpoint(cfg.out_path, model, tokenizer, {'stage': 'dpo', 'iter': cfg.max_iters, **metrics,
                                                      'config': to_dict(cfg)})

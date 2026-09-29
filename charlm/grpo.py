@@ -46,7 +46,7 @@ class GRPOConfig(TrainConfig):
     warmup_iters: int = 10
     weight_decay: float = 0.0
     eval_interval: int = 25
-    eval_per_task: int = 50  # held-out examples per task for measuring accuracy (0 = skip)
+    eval_per_task: int = 50  # held-out examples per verifiable task for measuring accuracy (0 = skip)
     dropout: Optional[float] = 0.0  # dropout would make the probability ratios noisy
 
 
@@ -81,7 +81,7 @@ def grpo(cfg):
     ref_model, _, _ = load_checkpoint(cfg.ref_from or cfg.init_from, device, dropout=0.0)
     ref_model.eval().requires_grad_(False)
     suite = TaskSuite(load_text(cfg.corpus_path))
-    eval_set = suite.eval_set(cfg.eval_per_task, cfg.tasks) if cfg.eval_per_task else []
+    eval_set = suite.eval_set(cfg.eval_per_task) if cfg.eval_per_task else []  # all tasks, not just trained ones
     print(f"device {device} | {cfg.batch_size} prompts x {cfg.group_size} replies per step | "
           f"{len(eval_set)} eval prompts")
 

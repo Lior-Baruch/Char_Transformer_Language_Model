@@ -3,7 +3,6 @@ import os
 
 import pytest
 import torch
-from torch.nn import functional as F
 
 from charlm import (CharTokenizer, CharTransformerLanguageModel, DPOConfig, GRPOConfig, ModelConfig, PretrainConfig,
                     SFTConfig, TaskSuite, dpo, encode_chat_example, grpo, load_checkpoint, load_config, pretrain,
@@ -177,8 +176,8 @@ def test_resumed_run_matches_uninterrupted_run(stage, tmp_path, monkeypatch):
     assert not (tmp_path / 'resumed.state.pt').exists()
     for a, b in zip(full.state_dict().values(), resumed.state_dict().values()):
         assert torch.equal(a, b)
-    logs = [[{k: v for k, v in json.loads(line).items() if k != 'time'} for line in open(tmp_path / f'{n}.metrics.jsonl')]
-            for n in ('full', 'resumed')]
+    logs = [[{k: v for k, v in json.loads(line).items() if k != 'time'}
+             for line in open(tmp_path / f'{name}.metrics.jsonl')] for name in ('full', 'resumed')]
     assert logs[0] == logs[1]
     assert [row['step'] for row in logs[0]] == ([0, 3, 6, 7] if stage in ('pretrain', 'sft') else [0, 3, 6, 8])
 
@@ -198,7 +197,7 @@ def test_full_pipeline(tmp_path):
         f'init_from={base}', f'out_path={sft_path}', 'n_train=64', 'n_val=16', 'batch_size=8', 'max_iters=4',
         'eval_interval=2']))
     dpo(load_config(DPOConfig, None, common + [
-        f'init_from={sft_path}', f'out_path={tmp_path / "dpo.pt"}', 'n_pairs=8', 'batch_size=4', 'max_iters=2',
+        f'init_from={sft_path}', f'out_path={tmp_path / "dpo.pt"}', 'n_pairs=8', 'batch_size=4', 'max_iters=2', 'nll_coef=1.0',
         'eval_interval=1']))
     grpo(load_config(GRPOConfig, None, common + [
         f'init_from={sft_path}', f'out_path={tmp_path / "grpo.pt"}', 'batch_size=2', 'group_size=3',

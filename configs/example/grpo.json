@@ -2,14 +2,15 @@
   "init_from": "checkpoints/example/sft.pt",
   "out_path": "checkpoints/example/grpo.pt",
   "corpus_path": "data/input.txt",
+  "tasks": ["add"],
   "batch_size": 16,
-  "group_size": 8,
+  "group_size": 16,
   "temperature": 1.0,
   "kl_coef": 0.04,
   "max_iters": 300,
   "eval_interval": 25,
-  "learning_rate": 5e-5,
-  "min_lr": 5e-6,
+  "learning_rate": 0.0001,
+  "min_lr": 1e-05,
   "warmup_iters": 10,
   "eval_per_task": 100
 }
