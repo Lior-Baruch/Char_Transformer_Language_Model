@@ -1,0 +1,15 @@
+{
+  "init_from": "checkpoints/example/sft.pt",
+  "out_path": "checkpoints/example/dpo.pt",
+  "corpus_path": "data/input.txt",
+  "n_pairs": 4000,
+  "samples_per_prompt": 4,
+  "beta": 0.1,
+  "batch_size": 32,
+  "max_iters": 500,
+  "eval_interval": 50,
+  "learning_rate": 5e-5,
+  "min_lr": 5e-6,
+  "warmup_iters": 20,
+  "eval_per_task": 100
+}

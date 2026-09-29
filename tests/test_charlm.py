@@ -133,6 +133,43 @@ def test_tasks_are_correct_and_split():
     assert all(e.task == 'speak' for e in suite.sample(3, ['speak']))
 
 
+def test_resumed_pretraining_matches_uninterrupted_run(tmp_path, monkeypatch):
+    import importlib
+    import json
+    pretrain_module = importlib.import_module('charlm.pretrain')  # the module, not the pretrain function
+    corpus = tmp_path / 'corpus.txt'
+    corpus.write_text(open(CORPUS).read()[:50_000])
+
+    def config(name, resume=False):
+        return load_config(PretrainConfig, None, [
+            f'data_path={corpus}', f'out_path={tmp_path / name}.pt', 'model.n_embd=16', 'model.n_head=2',
+            'model.n_layer=1', 'model.block_size=16', 'batch_size=4', 'max_iters=8', 'eval_interval=3',
+            'eval_iters=2', 'patience=0', 'device=cpu', 'sample_tokens=0', f'resume={json.dumps(resume)}'])
+
+    full, _ = pretrain(config('full'))
+
+    real_step = pretrain_module.optimizer_step
+
+    def crash_at_step_5(model, optimizer, loss, it, cfg):
+        if it == 5:
+            raise KeyboardInterrupt
+        return real_step(model, optimizer, loss, it, cfg)
+
+    monkeypatch.setattr(pretrain_module, 'optimizer_step', crash_at_step_5)
+    with pytest.raises(KeyboardInterrupt):
+        pretrain(config('resumed'))
+    assert (tmp_path / 'resumed.state.pt').exists()
+    monkeypatch.setattr(pretrain_module, 'optimizer_step', real_step)
+    resumed, _ = pretrain(config('resumed', resume=True))
+
+    assert not (tmp_path / 'resumed.state.pt').exists()
+    for a, b in zip(full.state_dict().values(), resumed.state_dict().values()):
+        assert torch.equal(a, b)
+    logs = [[{k: v for k, v in json.loads(line).items() if k != 'time'} for line in open(tmp_path / f'{n}.metrics.jsonl')]
+            for n in ('full', 'resumed')]
+    assert logs[0] == logs[1] and [row['step'] for row in logs[0]] == [0, 3, 6, 7]
+
+
 def test_full_pipeline(tmp_path):
     """ pretrain -> SFT -> DPO and GRPO with tiny settings, then the CLI eval """
     corpus = tmp_path / 'corpus.txt'

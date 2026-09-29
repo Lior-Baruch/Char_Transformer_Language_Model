@@ -78,12 +78,13 @@ def metrics_path(out_path):
 class MetricsLogger:
     """ prints metrics and appends them as JSON lines to a file, for plotting and comparing runs """
 
-    def __init__(self, path=None):
+    def __init__(self, path=None, append=False):
         self.path = path
         self.start = time.time()
         if path:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-            open(path, 'w').close()
+            if not append:
+                open(path, 'w').close()
 
     def log(self, step, **metrics):
         metrics = {k: float(v) if isinstance(v, torch.Tensor) else v for k, v in metrics.items()}

@@ -48,7 +48,7 @@ def parse_speeches(text, min_speeches=20, min_len=10, max_len=60):
 class TaskSuite:
     """ generates task examples; the train/eval split is fixed by split_seed """
 
-    def __init__(self, text, split_seed=0, eval_fraction=0.2, min_word_len=3, max_word_len=8, max_number=99):
+    def __init__(self, text, split_seed=0, eval_fraction=0.2, min_word_len=3, max_word_len=12, max_number=99):
         rng = random.Random(split_seed)
         words = sorted({w for w in re.findall(r"[a-z]+", text.lower()) if min_word_len <= len(w) <= max_word_len})
         pairs = [(a, b) for a in range(max_number + 1) for b in range(max_number + 1)]
