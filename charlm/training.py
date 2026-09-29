@@ -76,21 +76,28 @@ def state_path(out_path):
     return os.path.splitext(out_path)[0] + '.state.pt'
 
 
-def save_state(out_path, model, optimizer, it, **extra):
-    """ everything needed to continue a run from iteration it: weights, optimizer, random-number generators and
-    any stage-specific values (a random.Random in extra is stored by its state) """
+def save_state(out_path, model, optimizer, it, config, **extra):
+    """ everything needed to continue a run from iteration it: weights, optimizer, random-number generators, the
+    run's config (a dict) and any stage-specific values (a random.Random in extra is stored by its state) """
     extra = {k: ('py_rng', v.getstate()) if isinstance(v, random.Random) else v for k, v in extra.items()}
     torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'torch_rng': torch.get_rng_state(),
-                'iter': it, 'extra': extra}, state_path(out_path))
+                'iter': it, 'config': config, 'extra': extra}, state_path(out_path))
 
 
-def load_state(out_path, model, optimizer, device, **rngs):
+def load_state(out_path, model, optimizer, device, config, **rngs):
     """ restore a run saved by save_state; random.Random objects passed in rngs get their saved state back.
-    returns (iteration to continue from, the other extra values), or (0, None) when there is nothing to resume """
+    returns (iteration to continue from, the other extra values), or (0, None) when there is nothing to resume.
+    Refuses to resume when the settings differ from the saved run's, since that would mix two different runs. """
     path = state_path(out_path)
     if not os.path.exists(path):
         return 0, None
     state = torch.load(path, map_location=device, weights_only=True)
+    ignored = {'resume', 'device'}
+    changed = sorted(k for k in set(config) | set(state['config'])
+                     if k not in ignored and config.get(k) != state['config'].get(k))
+    if changed:
+        raise ValueError(f"{path} was saved by a run with different settings ({', '.join(changed)}); "
+                         f"restore those settings to resume it, or delete the file to start over")
     model.load_state_dict(state['model'])
     optimizer.load_state_dict(state['optimizer'])
     torch.set_rng_state(state['torch_rng'].cpu())

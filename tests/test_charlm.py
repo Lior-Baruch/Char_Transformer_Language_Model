@@ -171,6 +171,9 @@ def test_resumed_run_matches_uninterrupted_run(stage, tmp_path, monkeypatch):
         run(config('resumed'))
     assert (tmp_path / 'resumed.state.pt').exists()
     monkeypatch.setattr(module, 'optimizer_step', real_step)
+    with pytest.raises(ValueError, match='different settings'):  # resuming with other settings would mix two runs
+        run(load_config(config_cls, None, common + options + [f'out_path={tmp_path / "resumed.pt"}', 'resume=true',
+                                                              'max_iters=9']))
     resumed, _ = run(config('resumed', resume=True))
 
     assert not (tmp_path / 'resumed.state.pt').exists()
@@ -197,8 +200,8 @@ def test_full_pipeline(tmp_path):
         f'init_from={base}', f'out_path={sft_path}', 'n_train=64', 'n_val=16', 'batch_size=8', 'max_iters=4',
         'eval_interval=2']))
     dpo(load_config(DPOConfig, None, common + [
-        f'init_from={sft_path}', f'out_path={tmp_path / "dpo.pt"}', 'n_pairs=8', 'batch_size=4', 'max_iters=2', 'nll_coef=1.0',
-        'eval_interval=1']))
+        f'init_from={sft_path}', f'out_path={tmp_path / "dpo.pt"}', 'n_pairs=8', 'batch_size=4', 'max_iters=2',
+        'eval_interval=1', 'nll_coef=1.0']))
     grpo(load_config(GRPOConfig, None, common + [
         f'init_from={sft_path}', f'out_path={tmp_path / "grpo.pt"}', 'batch_size=2', 'group_size=3',
         'max_new_tokens=8', 'max_iters=2', 'eval_interval=1']))

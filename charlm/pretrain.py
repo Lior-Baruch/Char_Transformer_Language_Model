@@ -63,7 +63,7 @@ def pretrain(cfg):
 
     optimizer = make_optimizer(model, cfg)
     best_val_loss, evals_without_improvement = float('inf'), 0
-    start_iter, state = load_state(cfg.out_path, model, optimizer, device) if cfg.resume else (0, None)
+    start_iter, state = load_state(cfg.out_path, model, optimizer, device, to_dict(cfg)) if cfg.resume else (0, None)
     if state is not None:
         best_val_loss, evals_without_improvement = state['best_val_loss'], state['evals_without_improvement']
     logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None)
@@ -82,7 +82,7 @@ def pretrain(cfg):
                 if cfg.patience and evals_without_improvement >= cfg.patience:
                     print(f"early stopping: val loss has not improved for {cfg.patience} evaluations")
                     break
-            save_state(cfg.out_path, model, optimizer, it, best_val_loss=best_val_loss,
+            save_state(cfg.out_path, model, optimizer, it, to_dict(cfg), best_val_loss=best_val_loss,
                        evals_without_improvement=evals_without_improvement)
 
         x, y = get_text_batch(splits['train'], cfg.batch_size, model.config.block_size, device)

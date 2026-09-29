@@ -163,7 +163,8 @@ def dpo(cfg):
 
     rng = random.Random(cfg.seed)
     optimizer = make_optimizer(model, cfg)
-    start_iter, state = load_state(cfg.out_path, model, optimizer, device, rng=rng) if cfg.resume else (0, None)
+    start_iter, state = (load_state(cfg.out_path, model, optimizer, device, to_dict(cfg), rng=rng)
+                         if cfg.resume else (0, None))
     logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None)
     train_stats, metrics = [], {}
     for it in range(start_iter, cfg.max_iters + 1):
@@ -176,7 +177,7 @@ def dpo(cfg):
             if eval_set:
                 metrics.update(evaluate_tasks(model, tokenizer, eval_set, cfg.max_new_tokens))
             logger.log(it, **metrics)
-            save_state(cfg.out_path, model, optimizer, it, rng=rng)
+            save_state(cfg.out_path, model, optimizer, it, to_dict(cfg), rng=rng)
         if it == cfg.max_iters:
             break
 

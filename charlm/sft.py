@@ -89,7 +89,8 @@ def sft(cfg):
     rng = random.Random(cfg.seed)
     optimizer = make_optimizer(model, cfg)
     best_val_loss, evals_without_improvement, train_losses = float('inf'), 0, []
-    start_iter, state = load_state(cfg.out_path, model, optimizer, device, rng=rng) if cfg.resume else (0, None)
+    start_iter, state = (load_state(cfg.out_path, model, optimizer, device, to_dict(cfg), rng=rng)
+                         if cfg.resume else (0, None))
     if state is not None:
         best_val_loss, evals_without_improvement = state['best_val_loss'], state['evals_without_improvement']
     logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None)
@@ -111,7 +112,7 @@ def sft(cfg):
                 if cfg.patience and evals_without_improvement >= cfg.patience:
                     print(f"early stopping: val loss has not improved for {cfg.patience} evaluations")
                     break
-            save_state(cfg.out_path, model, optimizer, it, rng=rng, best_val_loss=best_val_loss,
+            save_state(cfg.out_path, model, optimizer, it, to_dict(cfg), rng=rng, best_val_loss=best_val_loss,
                        evals_without_improvement=evals_without_improvement)
 
         x, y = pad_batch([rng.choice(train) for _ in range(cfg.batch_size)], tokenizer.pad_id, device)
