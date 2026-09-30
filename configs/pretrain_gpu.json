@@ -1,0 +1,13 @@
+{
+  "data_path": "data/input.txt",
+  "out_path": "checkpoints/base_gpu.pt",
+  "model": {"block_size": 256, "n_embd": 384, "n_head": 6, "n_layer": 6, "dropout": 0.2},
+  "batch_size": 64,
+  "max_iters": 5000,
+  "eval_interval": 500,
+  "eval_iters": 200,
+  "learning_rate": 1e-3,
+  "min_lr": 1e-4,
+  "warmup_iters": 100,
+  "patience": 3
+}

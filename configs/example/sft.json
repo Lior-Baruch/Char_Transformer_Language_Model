@@ -1,0 +1,15 @@
+{
+  "init_from": "checkpoints/example/base.pt",
+  "out_path": "checkpoints/example/sft.pt",
+  "corpus_path": "data/input.txt",
+  "n_train": 50000,
+  "n_val": 1000,
+  "batch_size": 64,
+  "max_iters": 3000,
+  "eval_interval": 250,
+  "learning_rate": 1e-3,
+  "min_lr": 1e-4,
+  "warmup_iters": 100,
+  "eval_per_task": 50,
+  "patience": 3
+}

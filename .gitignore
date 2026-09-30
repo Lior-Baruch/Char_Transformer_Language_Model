@@ -1,0 +1,8 @@
+# model checkpoints saved during training
+*.pt
+# except the example models
+!checkpoints/example/*.pt
+# training state for resuming (large, deleted when a run finishes)
+*.state.pt
+__pycache__/
+*.egg-info/
