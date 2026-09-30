@@ -82,7 +82,8 @@ def axis_label(ax, t, x=None, y=None):
 def legend(fig, t, labels, y=None, kind='line'):
     """ one row of legend keys under the subtitle; text in ink, identity in the key beside it """
     handles = [Line2D([], [], color=c, lw=2 * PX * 1.5, solid_capstyle='round') if kind == 'line' else
-               Patch(facecolor=c, edgecolor='none') for c in t['series'][:len(labels)]]
+               Line2D([], [], ls='none', marker='o', ms=10 * PX, mfc=c, mec=t['surface'], mew=2 * PX) if kind == 'dot'
+               else Patch(facecolor=c, edgecolor='none') for c in t['series'][:len(labels)]]
     fig.legend(handles, labels, loc='upper left', bbox_to_anchor=(0.015, y), ncol=len(labels), frameon=False,
                fontsize=8.5, labelcolor=t['ink2'], handlelength=1.6, columnspacing=1.6, handletextpad=0.6)
 

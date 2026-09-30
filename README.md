@@ -5,22 +5,22 @@
 
 A small, readable PyTorch library for experimenting with the whole LLM training pipeline, one character at a time:
 
-```
-                 pretrain                 SFT                      DPO
-data/input.txt ───────────▶ base model ─────────▶ instruct model ─────────▶ preference-tuned model
-(Shakespeare)             (writes Shakespeare)   (follows instructions) │
-                                                                        │  GRPO
-                                                                        └─────────▶ RL-tuned model
-```
-
 1. **Pretraining.** A GPT-style transformer learns to predict the next character of Shakespeare's plays.
 2. **Supervised fine-tuning (SFT).** The base model learns a chat format and a set of instruction-following tasks, such as "Reverse the word: love" → "evol".
 3. **Preference tuning (DPO).** The instruct model is trained on pairs of a correct answer and one of its own wrong answers.
 4. **Reinforcement learning (GRPO).** The instruct model samples several answers per prompt and is rewarded for the correct ones.
+5. **Reasoning.** With `reasoning: true`, SFT teaches the model to work out math problems step by step, between `<|think|>` and `<|/think|>`, before it answers.
 
-Every stage runs on a laptop CPU. The example models in `checkpoints/example/` were trained that way in about 70 minutes in total, and each stage measurably improves on the one before (see [Results](#results-of-the-example-models)).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/example_models_dark.png">
+  <img alt="Diagram of the example models. data/input.txt (Tiny Shakespeare, 1.1M characters) is pretrained into base.pt (writes Shakespeare, val loss 1.48, 0% on the tasks). SFT turns it into sft.pt (82% on 5 tasks, addition 13%), which DPO turns into dpo.pt (82%, addition 20%) and GRPO into grpo.pt (84%, addition 24%). SFT with reasoning turns base.pt into sft_reasoning.pt (99-100% on addition, subtraction, multiplication and division; word problems 22%), which GRPO turns into grpo_reasoning.pt (word problems 34%)." src="docs/figures/example_models.png">
+</picture>
 
-The models can also learn to **reason step by step**. Given `reasoning: true`, SFT teaches them to write a scratchpad between `<|think|>` and `<|/think|>` before answering a math question: addition, subtraction, multiplication, division and word problems such as "Adam has 12 apples to divide equally among 3 friends. How many each?" (see [Reasoning](#reasoning-step-by-step)). And for a bigger model, [a Colab notebook](#a-bigger-model-on-a-gpu-colab) pretrains a 59M-parameter model on a billion characters of [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) and fine-tunes it to reason.
+- **Everything runs on a laptop CPU.** The example models in `checkpoints/example/` took about 70 minutes to train, and the two reasoning models about 75 more, and each stage measurably improves on the one before (see [Results](#results-of-the-example-models)).
+- **Step-by-step reasoning makes arithmetic work.** The same 1.8M-parameter model gets 4-31% of held-out additions, subtractions, multiplications and divisions right when it answers directly, and 99-100% when it writes out the steps (see [Reasoning](#reasoning-step-by-step)).
+- **A bigger model on a GPU.** [A Colab notebook](#a-bigger-model-on-a-gpu-colab) pretrains a 59M-parameter model on a billion characters of [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) and fine-tunes it to reason.
+
+**Contents:** [Install](#install) · [Quick start](#quick-start) · [Colab](#a-bigger-model-on-a-gpu-colab) · [Results](#results-of-the-example-models) · [Reasoning](#reasoning-step-by-step) · [Library](#using-it-as-a-library) · [How it works](#how-it-works) · [Experiment ideas](#experiment-ideas) · [Project layout](#project-layout)
 
 ## Install
 
@@ -268,16 +268,38 @@ python -m charlm eval --model checkpoints/example/sft_reasoning.pt --tasks add s
   <img alt="Grouped bar chart of held-out accuracy of four models on add, sub, mul, div, word and all nine tasks. The plain SFT model scores 4% to 31% on the arithmetic tasks, and GRPO barely changes that. Both reasoning models score 99% to 100%. On word problems the plain models score under 5%, the reasoning model 22% and 34% after GRPO. Overall: 52%, 53%, 91% and 92%." src="docs/figures/reasoning_final.png">
 </picture>
 
-**The scratchpad solves the arithmetic.** Without it, SFT gets 8% of held-out additions right, 4% of subtractions, 31% of multiplications and 21% of divisions. With it, 99-100% on all four, with 3-digit numbers. The model, the prompts and the number of steps are the same. Without a scratchpad, the model must produce the first digit of `386 * 7 = 2702` before it has worked out the carries that decide it. With one, each step needs only a few symbols written just before it: `8*7=56+4=60` needs the digit, the multiplier and the carry from the step before. The model also follows the method exactly: on add, sub, mul and div, 99-100% of its scratchpads are the taught trace, character for character.
+**The scratchpad solves the arithmetic.** Without it, SFT gets 8% of held-out additions right, 4% of subtractions, 31% of multiplications and 21% of divisions. With it, 99-100% on all four, with numbers up to 999 (99 for addition). The model, the prompts and the number of steps are the same. The model also follows the method exactly: on add, sub, mul and div, 99-100% of its scratchpads are the taught trace, character for character.
 
-The price is length: a reasoning reply to a math question is ~55 tokens instead of ~4, so the reasoning SFT run took almost twice as long on the same hardware (63 minutes instead of 36).
+Where does the plain model go wrong? Mostly in the low digits. It gets the size of the answer right: the digit of the highest place value is right 89-97% of the time. But an addition's ones digit is right only 9% of the time, about a random guess, and a subtraction's tens and ones digits 20% and 13%. Multiplication shows why: its ones digit is right almost always, because the last digit of `386 * 7` only depends on `6 * 7`, a times-table fact. The middle digits, which also depend on carries from the digits to their right, are right only half the time. With a scratchpad, each digit gets its own step, and each step only needs what was written just before it: `8*7=56+4=60` combines the digit, the multiplier and the carry from the step before.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_digits_dark.png">
+  <img alt="Four small grouped bar charts, one per arithmetic task, showing the share of held-out answers with each digit right, by place value. The reasoning model gets every digit right 99-100% of the time. The plain model gets the highest place value right 89-97% of the time, but the ones digit of an addition only 9%, the tens and ones of a subtraction 20% and 13%, the middle digits of a multiplication 54% and 50% (its ones digit 100%), and the tens and ones of a division 33% and 66%." src="docs/figures/reasoning_digits.png">
+</picture>
+
+Training curves show the same thing from another side: the reasoning model learns multiplication first (100% by step 2,000) and division last (step 4,250), while the plain model stays at or below 28% on every math task.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_sft_dark.png">
   <img alt="Five small line charts of held-out accuracy during SFT on add, sub, mul, div and word, for the plain and the reasoning model. The reasoning model reaches 100% on mul by step 2,000, on add and sub by step 3,250 and on div by step 4,250. The plain model stays at or below 28%. On word problems the reasoning model stays between 16% and 28% after step 1,000, and the plain one under 6%." src="docs/figures/reasoning_sft.png">
 </picture>
 
+**The price is length.** A reasoning reply to a math question is 39-73 tokens instead of 3-5, about 15 times longer. Training on the longer replies took almost twice as long on the same hardware (63 minutes instead of 36), and every answer takes that many more steps to generate.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_cost_dark.png">
+  <img alt="Horizontal bar chart of average reply length per math task. Plain SFT replies are 3-5 tokens long and 4-31% right; reasoning replies are 39 tokens for add (100% right), 59 for sub (100%), 66 for mul (100%), 73 for div (99%) and 45 for word problems (22%)." src="docs/figures/reasoning_cost.png">
+</picture>
+
 **Word problems are about language, not arithmetic.** The reasoning model gets 22% of the held-out word problems. They are asked in a fourth phrasing it never saw. The same problems asked in one of its three training phrasings get 98%:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_word_dark.png">
+  <img alt="Dot plot of word-problem accuracy per operation. In the phrasings it trained on, the reasoning model gets 100% of addition, subtraction and multiplication stories and 92% of division stories. In the new phrasing it gets 25% of addition (45% after GRPO), 2% of subtraction (1% after GRPO), 1% of multiplication (22% after GRPO) and 60% of division (71% after GRPO)." src="docs/figures/reasoning_word.png">
+</picture>
+
+<details>
+<summary>The numbers</summary>
 
 | model | phrasing | accuracy | reads the story right (right equation) | + | - | * | / |
 |---|---|---|---|---|---|---|---|
@@ -286,13 +308,17 @@ The price is length: a reasoning reply to a math question is ~55 tokens instead 
 | SFT + reasoning + GRPO | never trained on | 34% | 33% | 45% | 1% | 22% | 71% |
 | SFT + reasoning + GRPO | trained on | 97% | 100% | 100% | 100% | 100% | 89% |
 
-With the new phrasing, the model writes the wrong equation first. It reads "There are 7 marbles and 8 more arrive" as `87+8`, and "Adam puts 20 stickers into 5 equal groups" as `20+5`. Three phrasings per operation are not enough for a character-level model to learn what the words mean. More phrasings, or a bigger model pretrained on more English (like the [Colab model](#a-bigger-model-on-a-gpu-colab)), are the natural next experiments.
+"Reads the story right" means the equation the model writes first (like `12/3:`) has the right result.
+
+</details>
+
+With the new phrasing, the model mostly writes the wrong equation first. It reads "There are 7 marbles and 8 more arrive" as `87+8`, and "Adam puts 20 stickers into 5 equal groups" as `20+5`. Three phrasings per operation are not enough for a character-level model to learn what the words mean. More phrasings, or a bigger model pretrained on more English (like the [Colab model](#a-bigger-model-on-a-gpu-colab)), are the natural next experiments.
 
 **GRPO has little left to teach, but it helps with the new phrasing.** The reasoning model already gets 99% of its sampled training replies right, so only ~5% of the groups contain both a right and a wrong reply, and only those carry a learning signal. The arithmetic stays at 99-100%. Still, held-out word problems rise from 22% to 34%, although GRPO trains only on the three training phrasings. The gain comes from reading the new phrasing better: multiplication stories go from 1% to 22%, addition stories from 25% to 45%. The plain model's GRPO run goes nowhere: its reward stays near 20%, and no task's held-out accuracy moves by more than 4 points. GRPO took 5 minutes for the plain model and 13 for the reasoning one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_grpo_dark.png">
-  <img alt="Two line charts over 300 GRPO steps. Reward: the reasoning model gets 98-99% of its sampled replies right throughout, the plain model 16-22%. Held-out word problems in the new phrasing: the reasoning model rises from 18% to 28% (50 prompts), the plain model stays at 0-4%." src="docs/figures/reasoning_grpo.png">
+  <img alt="Three line charts over 300 GRPO steps. Reward: the reasoning model gets 98-99% of its sampled replies right throughout, the plain model 16-22%. Groups with both right and wrong replies: 31-40% for the plain model, 3-8% for the reasoning model. Held-out word problems in the new phrasing: the reasoning model rises from 18% to 28% (50 prompts), the plain model stays at 0-4%." src="docs/figures/reasoning_grpo.png">
 </picture>
 
 Replies of the two SFT models to the first held-out prompts of each math task (greedy):
@@ -362,6 +388,12 @@ Attention is scaled by 1/sqrt(head_size). When generating, a KV cache keeps each
 
 - The model is trained on (prompt, response) pairs in the chat template.
 - The loss is computed only on the response and `<|end|>` tokens. The prompt positions get target `-100`, so the model learns to answer rather than to imitate the user.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/sft_tokens_dark.png">
+  <img alt="Diagram of one SFT example as a row of tokens. The prompt, <|user|>What is 47 + 85?<|assistant|>, is gray: no loss. The reply is colored: the reasoning <|think|>7+5+0=12 A=2, 4+8+1=13 A=132 => 132<|/think|> in orange and the answer 132<|end|> in blue. The model is trained to predict every reply token." src="docs/figures/sft_tokens.png">
+</picture>
+
 - The data is synthetic by default (see Tasks below). You can pass your own JSONL file of `{"prompt": ..., "response": ...}` rows with `data_path`.
 
 ### Tasks (`charlm/tasks.py`)
@@ -473,7 +505,7 @@ notebooks/colab_pipeline.ipynb   the GPU pipeline on Colab
 checkpoints/example/   trained example models, their metrics and the DPO pairs
   experiments/  metrics of the variants and comparison runs
 docs/             README figures and the scripts that make them (make_figures.py, make_examples.py,
-                  make_reasoning_figures.py)
+                  make_reasoning_figures.py, make_diagrams.py)
 data/input.txt    Tiny Shakespeare (1.1M characters)
 tests/            pytest suite, including a tiny end-to-end run of the pipeline
 char_transformer_language_model.ipynb   the original self-contained notebook walkthrough
