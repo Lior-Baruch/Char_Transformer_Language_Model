@@ -9,7 +9,7 @@ their metrics (checkpoints/example/experiments/); train them first to rerun the 
     python -m charlm sft  --config configs/reasoning/sft_plain.json
     python -m charlm grpo --config configs/reasoning/grpo_plain.json
 
-The evaluation (500 held-out prompts per task, about 10 minutes on 4 CPU cores) is saved to
+The evaluation (500 held-out prompts per task, a few minutes per model on a CPU) is saved to
 checkpoints/example/experiments/reasoning_eval.json and reused on later runs; delete it to evaluate again.
 """
 import json
@@ -29,25 +29,30 @@ MAX_NEW_TOKENS = 100
 RESULTS = os.path.join(EXAMPLE, 'experiments', 'reasoning_eval.json')
 
 
-def evaluate():
-    """ accuracy (and the replies) of the four models on EVAL_PER_TASK held-out prompts per task """
+def evaluate(models=MODELS):
+    """ accuracy (and every 10th reply) of the models on EVAL_PER_TASK held-out prompts per task; each model's
+    results are saved as soon as they are computed, and models already in the file are not evaluated again """
+    results = {'n_per_task': EVAL_PER_TASK, 'max_new_tokens': MAX_NEW_TOKENS, 'models': {}}
     if os.path.exists(RESULTS):
         with open(RESULTS) as f:
-            return json.load(f)
+            results = json.load(f)
+    missing = [(label, path) for label, path in models if label not in results['models']]
+    if not missing:
+        return results
     sys.path.insert(0, ROOT)
     from charlm import TaskSuite, evaluate_tasks, load_checkpoint
     suite = TaskSuite(open(os.path.join(ROOT, 'data', 'input.txt')).read())
     examples = suite.eval_set(EVAL_PER_TASK, TASKS)
-    results = {'n_per_task': EVAL_PER_TASK, 'max_new_tokens': MAX_NEW_TOKENS,
-               'distinct_prompts': {t: len({e.prompt for e in examples if e.task == t}) for t in TASKS},
-               'models': {}}
-    for label, path in MODELS:
+    results['distinct_prompts'] = {t: len({e.prompt for e in examples if e.task == t}) for t in TASKS}
+    for label, path in missing:
+        if not os.path.exists(os.path.join(EXAMPLE, f'{path}.pt')):
+            raise FileNotFoundError(f"{path}.pt is missing; train it first (see the top of this file)")
         model, tokenizer, _ = load_checkpoint(os.path.join(EXAMPLE, f'{path}.pt'))
         metrics, replies = evaluate_tasks(model, tokenizer, examples, MAX_NEW_TOKENS, return_replies=True)
         results['models'][label] = {'metrics': metrics, 'replies': replies[::EVAL_PER_TASK // 50]}  # every 10th
-        print(label, {k: round(v, 3) for k, v in metrics.items()})
-    with open(RESULTS, 'w') as f:
-        json.dump(results, f, indent=1)
+        print(label, {k: round(v, 3) for k, v in metrics.items()}, flush=True)
+        with open(RESULTS, 'w') as f:
+            json.dump(results, f, indent=1)
     return results
 
 
@@ -165,6 +170,9 @@ def examples(results, per_task=2):
 
 
 def main():
+    if sys.argv[1:2] == ['--only']:  # evaluate some models now, e.g. while another one is still training
+        evaluate([m for m in MODELS if m[0] in sys.argv[2:]])
+        return
     os.makedirs(OUT, exist_ok=True)
     results = evaluate()
     tables(results)
