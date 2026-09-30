@@ -9,6 +9,7 @@
   "learning_rate": 6e-4,
   "min_lr": 6e-5,
   "warmup_iters": 1000,
+  "max_val_chars": 2000000,
   "patience": 3,
   "precision": "auto",
   "resume": true,

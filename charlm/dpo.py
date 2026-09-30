@@ -28,9 +28,9 @@ from .evaluation import evaluate_tasks
 from .model import token_logprobs
 from .reasoning import format_response
 from .tasks import VERIFIABLE_TASKS, TaskSuite, eval_tasks, score
-from .training import (MetricsLogger, TrainConfig, clear_state, load_state, make_optimizer, metrics_path,
-                       optimizer_step, resolve_device, save_state, set_seed, setup_precision, skip_if_finished,
-                       state_path)
+from .training import (MetricsLogger, TrainConfig, check_init_from, clear_state, load_state, make_optimizer,
+                       metrics_path, optimizer_step, resolve_device, save_state, set_seed, setup_precision,
+                       skip_if_finished, state_path)
 
 
 @dataclass
@@ -141,6 +141,7 @@ def dpo(cfg):
     done = skip_if_finished(cfg, device)
     if done:
         return done
+    check_init_from(cfg.init_from)
     model, tokenizer, _ = load_checkpoint(cfg.init_from, device, dropout=cfg.dropout)
     ref_model, ref_tokenizer, _ = load_checkpoint(cfg.ref_from or cfg.init_from, device, dropout=0.0)
     if ref_tokenizer.to_dict() != tokenizer.to_dict():
@@ -180,8 +181,8 @@ def dpo(cfg):
     optimizer = make_optimizer(model, cfg)
     start_iter, state = (load_state(cfg.out_path, model, optimizer, device, cfg, scaler, rng=rng)
                          if cfg.resume else (0, None))
-    logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None)
-    train_stats, metrics = [], {}
+    logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None, keep_until=start_iter)
+    train_stats, metrics = [], state.get('metrics', {}) if state is not None else {}
     for it in range(start_iter, cfg.max_iters + 1):
         if (it % cfg.eval_interval == 0 or it == cfg.max_iters) and not (state is not None and it == start_iter):
             metrics = validate(model, val, *val_ref, cfg, tokenizer.pad_id, device)
@@ -193,7 +194,7 @@ def dpo(cfg):
                 metrics.update(evaluate_tasks(model, tokenizer, eval_set, cfg.max_new_tokens))
             logger.log(it, **metrics)
             if (it // cfg.eval_interval) % cfg.state_every == 0:
-                save_state(cfg.out_path, model, optimizer, it, cfg, scaler, rng=rng)
+                save_state(cfg.out_path, model, optimizer, it, cfg, scaler, rng=rng, metrics=metrics)
         if it == cfg.max_iters:
             break
 

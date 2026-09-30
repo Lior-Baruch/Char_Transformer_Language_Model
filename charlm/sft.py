@@ -21,8 +21,9 @@ from .evaluation import evaluate_tasks
 from .reasoning import format_response
 from .tasks import ALL_TASKS, TaskSuite, eval_tasks
 from .tokenizer import REASONING_TOKENS
-from .training import (MetricsLogger, TrainConfig, clear_state, load_state, make_optimizer, metrics_path,
-                       optimizer_step, resolve_device, save_state, set_seed, setup_precision, skip_if_finished)
+from .training import (MetricsLogger, TrainConfig, check_init_from, clear_state, load_state, make_optimizer,
+                       metrics_path, optimizer_step, resolve_device, save_state, set_seed, setup_precision,
+                       skip_if_finished)
 
 
 @dataclass
@@ -99,6 +100,7 @@ def sft(cfg):
     done = skip_if_finished(cfg, device)
     if done:
         return done
+    check_init_from(cfg.init_from)
     model, tokenizer, _ = load_checkpoint(cfg.init_from, device, dropout=cfg.dropout)
     suite = TaskSuite(load_text(cfg.corpus_path))
     train_pairs, val_pairs = load_sft_data(cfg, suite)
@@ -123,7 +125,7 @@ def sft(cfg):
                          if cfg.resume else (0, None))
     if state is not None:
         best_val_loss, evals_without_improvement = state['best_val_loss'], state['evals_without_improvement']
-    logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None)
+    logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None, keep_until=start_iter)
     for it in range(start_iter, cfg.max_iters + 1):  # the last iteration only evaluates the final update
         if (it % cfg.eval_interval == 0 or it == cfg.max_iters) and not (state is not None and it == start_iter):
             metrics = {'val_loss': dataset_loss(model, val, cfg.batch_size, tokenizer.pad_id, device)}

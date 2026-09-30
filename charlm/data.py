@@ -31,11 +31,11 @@ def expand_paths(data_path):
     paths = []
     for item in items:
         if os.path.isdir(item):
-            found = sorted(glob.glob(os.path.join(item, '*.txt')))
+            found = sorted(glob.glob(os.path.join(glob.escape(item), '*.txt')))
+        elif os.path.isfile(item):  # before patterns, so a file named like one ("draft[1].txt") is found
+            found = [item]
         elif glob.has_magic(item):
             found = sorted(glob.glob(item))
-        elif os.path.exists(item):
-            found = [item]
         else:
             raise FileNotFoundError(f"no such file: {item!r}")
         if not found:

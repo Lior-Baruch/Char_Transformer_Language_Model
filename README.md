@@ -276,7 +276,7 @@ Attention is scaled by 1/sqrt(head_size). When generating, a KV cache keeps each
 
 - Random 128-character windows of the text are used as training inputs, and the target at every position is the next character.
 - The last 10% of the text is held out as validation data.
-- `data_path` can be a file, a directory of `.txt` files, a pattern like `"data/*.txt"`, or a list of these. With several files, the end of each file is held out (at most `max_val_chars` characters per file). ASCII text is stored as one byte per character, so a 1 GB corpus fits in 1 GB of memory.
+- `data_path` can be a file, a directory of `.txt` files, a pattern like `"data/*.txt"`, or a list of these. With several files, the end of each file is held out. `max_val_chars` caps that part (the Colab config holds out 2M characters rather than 10% of a billion). ASCII text is stored as one byte per character, so a 1 GB corpus fits in 1 GB of memory.
 - The learning rate follows a linear warmup, then a cosine decay.
 - The checkpoint with the lowest validation loss is kept, and training stops early once the validation loss stops improving.
 
@@ -394,7 +394,8 @@ notebooks/colab_pipeline.ipynb   the GPU pipeline on Colab
 .github/workflows/data.yml    CI: checks that the dataset downloads still work (when the data code changes)
 checkpoints/example/   trained example models, their metrics and the DPO pairs
   experiments/  metrics of the variants and comparison runs
-docs/             README figures and the scripts that make them (make_figures.py, make_examples.py)
+docs/             README figures and the scripts that make them (make_figures.py, make_examples.py,
+                  make_reasoning_figures.py)
 data/input.txt    Tiny Shakespeare (1.1M characters)
 tests/            pytest suite, including a tiny end-to-end run of the pipeline
 char_transformer_language_model.ipynb   the original self-contained notebook walkthrough

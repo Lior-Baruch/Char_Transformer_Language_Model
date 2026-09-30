@@ -8,8 +8,9 @@ The math tasks (add, sub, mul, div, word) also come with a step-by-step reasonin
 SFT can teach the model to write before its answer.
 
 Words, numbers and speeches are split into a train part and a held-out eval part, so evaluation measures whether
-the model learned the task rather than memorized the training examples. Word problems also hold out one phrasing
-per operation, so their eval score measures whether the model understands wording it never saw.
+the model learned the task rather than memorized the training examples. An arithmetic problem is held out in every
+task or in none: a word problem asking for 18 + 9 is held out exactly when "What is 18 + 9?" is. Word problems also
+hold out one phrasing per operation, so their eval score measures whether the model understands wording it never saw.
 """
 import random
 import re
@@ -91,6 +92,8 @@ class TaskSuite:
 
     def __init__(self, text, split_seed=0, eval_fraction=0.2, min_word_len=3, max_word_len=12, max_number=99,
                  max_operand=999):
+        if not 0 < eval_fraction < 1:
+            raise ValueError(f"eval_fraction must be between 0 and 1, got {eval_fraction}")
         self.split_seed, self.eval_fraction, self.max_operand = split_seed, eval_fraction, max_operand
         rng = random.Random(split_seed)
         words = sorted({w for w in re.findall(r"[a-z]+", text.lower()) if min_word_len <= len(w) <= max_word_len})
@@ -102,18 +105,25 @@ class TaskSuite:
             rng.shuffle(items)
             n_eval = int(len(items) * eval_fraction)
             self.pools[name] = {'eval': items[:n_eval], 'train': items[n_eval:]}
+        self._eval_pairs = set(self.pools['pairs']['eval'])
 
-    def _held_out(self, name, item):
-        """ whether a number problem belongs to the eval split: a stable hash, so the split is the same in every
-        run without listing every possible problem """
+    def _held_out(self, op, a, b):
+        """ whether the problem a op b belongs to the eval split, in every task that asks it. Additions use the
+        'add' task's number pairs; the other operations a stable hash, so the split is the same in every run
+        without listing every possible problem (a division is keyed by its divisor and quotient) """
+        if op == '+':
+            return (a, b) in self._eval_pairs
+        name, item = ('div', (b, a // b)) if op == '/' else ({'-': 'sub', '*': 'mul'}[op], (a, b))
         return zlib.crc32(f'{self.split_seed}:{name}:{item}'.encode()) % 10_000 < self.eval_fraction * 10_000
 
-    def _draw(self, rng, split, name, draw):
-        """ draw problems until one falls in the requested split """
-        while True:
-            item = draw()
-            if self._held_out(name, item) == (split == 'eval'):
-                return item
+    def _draw(self, split, op, draw, max_tries=100_000):
+        """ draw (a, b) problems until one falls in the requested split """
+        for _ in range(max_tries):
+            a, b = draw()
+            if self._held_out(op, a, b) == (split == 'eval'):
+                return a, b
+        raise ValueError(f"no {op} problems in the {split!r} split (eval_fraction {self.eval_fraction}); use another "
+                         f"eval_fraction or split_seed")
 
     def _choice(self, rng, pool, split, task):
         items = self.pools[pool][split]
@@ -145,17 +155,20 @@ class TaskSuite:
             def draw():
                 a = rng.randint(0, self.max_operand)
                 return a, rng.randint(0, a)
-            a, b = self._draw(rng, split, 'sub', draw)
+            a, b = self._draw(split, '-', draw)
             trace, answer = sub_trace(a, b)
             return Example(task, f"What is {a} - {b}?", answer, trace)
         if task == 'mul':
-            a, b = self._draw(rng, split, 'mul', lambda: (rng.randint(2, self.max_operand), rng.randint(2, 9)))
+            a, b = self._draw(split, '*', lambda: (rng.randint(2, self.max_operand), rng.randint(2, 9)))
             trace, answer = mul_trace(a, b)
             return Example(task, f"What is {a} * {b}?", answer, trace)
         if task == 'div':
-            b, q = self._draw(rng, split, 'div', lambda: (rng.randint(2, 9), rng.randint(2, self.max_operand)))
-            trace, answer = div_trace(b * q, b)
-            return Example(task, f"What is {b * q} / {b}?", answer, trace)
+            def draw():
+                b = rng.randint(2, 9)
+                return b * rng.randint(2, self.max_operand), b
+            a, b = self._draw(split, '/', draw)
+            trace, answer = div_trace(a, b)
+            return Example(task, f"What is {a} / {b}?", answer, trace)
         if task == 'word':
             return self._word_problem(rng, split)
         if task == 'speak':
@@ -178,7 +191,7 @@ class TaskSuite:
                 return rng.randint(2, 11), rng.randint(2, 9)
             b = rng.randint(2, 9)
             return b * rng.randint(2, 11), b
-        a, b = self._draw(rng, split, f'word{op}', draw)
+        a, b = self._draw(split, op, draw)
         trace, answer = TRACES[op](a, b)
         prompt = template.format(n=rng.choice(NAMES), i=rng.choice(ITEMS), a=a, b=b)
         return Example('word', prompt, answer, f'{a}{op}{b}: {trace}')

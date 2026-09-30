@@ -74,15 +74,44 @@ def setup_precision(cfg, device, *models):
     return torch.cuda.amp.GradScaler(enabled=enabled and device.startswith('cuda'))
 
 
+IGNORED_SETTINGS = {'resume', 'device', 'precision', 'state_every'}  # they don't change what a run computes
+
+
+def changed_settings(cfg, saved):
+    """ the settings in which cfg differs from a saved run's config (a dict). A setting missing from the saved
+    config (added to charlm after it was saved) counts as its default, also inside nested configs like model;
+    model.vocab_size is ignored, since pretraining sets it from the data """
+    config, defaults = to_dict(cfg), to_dict(type(cfg)())
+
+    def value(d, key):
+        if isinstance(defaults.get(key), dict):
+            return {k: v for k, v in {**defaults[key], **(d.get(key) or {})}.items() if k != 'vocab_size'}
+        return d.get(key, defaults.get(key))
+    return sorted(k for k in set(config) | set(saved)
+                  if k not in IGNORED_SETTINGS and value(config, k) != value(saved, k))
+
+
 def skip_if_finished(cfg, device):
     """ with resume=true, a stage whose checkpoint is complete (and has no state left to resume) is not run again,
     so re-running every cell of a notebook after a disconnect never overwrites finished work.
-    returns (model, tokenizer) of the finished checkpoint, or None when the stage should run """
+    returns (model, tokenizer) of the finished checkpoint, or None when the stage should run.
+    Raises an error if the finished run had different settings, rather than silently keeping its result """
     if cfg.resume and not os.path.exists(state_path(cfg.out_path)) and is_finished(cfg.out_path):
+        model, tokenizer, meta = load_checkpoint(cfg.out_path, device)
+        changed = changed_settings(cfg, meta.get('config', {}))
+        if changed:
+            raise ValueError(f"{cfg.out_path} was finished by a run with different settings ({', '.join(changed)}); "
+                             f"delete it to train again with the new settings")
         print(f"{cfg.out_path} is already finished; skipping (delete it, or set resume=false, to train it again)")
-        model, tokenizer, _ = load_checkpoint(cfg.out_path, device)
         return model, tokenizer
     return None
+
+
+def check_init_from(path):
+    """ warn when a stage starts from a checkpoint whose own training hasn't finished """
+    if os.path.exists(state_path(path)):
+        print(f"warning: {path} comes from an unfinished run ({state_path(path)} exists), so this stage starts "
+              f"from a partly trained model; finish that run first (run it again with resume=true)")
 
 
 def set_seed(seed):
@@ -108,25 +137,32 @@ def make_optimizer(model, cfg):
     return torch.optim.AdamW(groups, lr=cfg.learning_rate, betas=(0.9, 0.99))
 
 
+def backward(loss, scaler=None):
+    """ backprop loss, scaled up when an enabled GradScaler is given (fp16). Several calls add up their gradients,
+    which lets a batch too big for memory be processed in parts before one optimizer_step(..., loss=None) """
+    (scaler.scale(loss) if scaler is not None and scaler.is_enabled() else loss).backward()
+
+
 def optimizer_step(model, optimizer, loss, it, cfg, scaler=None):
-    """ backprop loss and update the model with the scheduled learning rate; returns the learning rate used.
-    With an enabled GradScaler (fp16), the loss is scaled for backprop and the gradients unscaled before clipping """
+    """ backprop loss (None: use the gradients already accumulated with backward) and update the model with the
+    scheduled learning rate, then clear the gradients; returns the learning rate used.
+    With an enabled GradScaler (fp16), the gradients are unscaled before clipping """
     lr = get_lr(it, cfg)
     for group in optimizer.param_groups:
         group['lr'] = lr
-    optimizer.zero_grad(set_to_none=True)
-    if scaler is not None and scaler.is_enabled():
-        scaler.scale(loss).backward()
+    if loss is not None:
+        backward(loss, scaler)
+    scaled = scaler is not None and scaler.is_enabled()
+    if scaled:
         scaler.unscale_(optimizer)  # clip the real gradients, not the scaled ones
-        if cfg.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-        scaler.step(optimizer)  # skips the step if the gradients overflowed
-        scaler.update()
-        return lr
-    loss.backward()
     if cfg.grad_clip > 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-    optimizer.step()
+    if scaled:
+        scaler.step(optimizer)  # skips the step if the gradients overflowed
+        scaler.update()
+    else:
+        optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
     return lr
 
 
@@ -188,10 +224,7 @@ def load_state(out_path, model, optimizer, device, cfg, scaler=None, **rngs):
     if not os.path.exists(path):
         return 0, None
     state = torch.load(path, map_location=device, weights_only=True)
-    config, defaults = to_dict(cfg), to_dict(type(cfg)())
-    ignored = {'resume', 'device', 'precision', 'state_every'}  # the precision is compared once resolved, below
-    changed = sorted(k for k in set(config) | set(state['config']) if k not in ignored
-                     and config.get(k, defaults.get(k)) != state['config'].get(k, defaults.get(k)))
+    changed = changed_settings(cfg, state['config'])  # the precision is compared once resolved, below
     saved_precision = state.get('precision', 'fp32')
     if saved_precision != _precision_of(model):
         changed.append(f"precision {saved_precision} vs {_precision_of(model)}")
@@ -229,15 +262,22 @@ def metrics_path(out_path):
 
 
 class MetricsLogger:
-    """ prints metrics and appends them as JSON lines to a file, for plotting and comparing runs """
+    """ prints metrics and appends them as JSON lines to a file, for plotting and comparing runs.
+    append continues an existing file; keep_until then first drops its rows after that step (a resumed run
+    repeats the evaluations after its last saved state) """
 
-    def __init__(self, path=None, append=False):
+    def __init__(self, path=None, append=False, keep_until=None):
         self.path = path
         self.start = time.time()
         if path:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             if not append:
                 open(path, 'w').close()
+            elif keep_until is not None and os.path.exists(path):
+                with open(path) as f:
+                    rows = [line for line in f if line.strip() and json.loads(line)['step'] <= keep_until]
+                with open(path, 'w') as f:
+                    f.writelines(rows)
 
     def log(self, step, **metrics):
         metrics = {k: float(v) if isinstance(v, torch.Tensor) else v for k, v in metrics.items()}

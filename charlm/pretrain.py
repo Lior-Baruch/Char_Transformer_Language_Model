@@ -23,7 +23,7 @@ class PretrainConfig(TrainConfig):
     init_from: Optional[str] = None  # continue training this checkpoint instead of starting from scratch
     model: ModelConfig = field(default_factory=ModelConfig)  # ignored when init_from is set
     val_fraction: float = 0.1  # the last part of each file is held out for validation...
-    max_val_chars: int = 2_000_000  # ...up to this many characters per file (0 = no limit)
+    max_val_chars: int = 0  # ...up to this many characters per file (0 = no limit; a big corpus needs little)
     batch_size: int = 64
     max_iters: int = 5000
     eval_interval: int = 500
@@ -99,7 +99,7 @@ def pretrain(cfg):
             raise ValueError(f"the data files changed since the interrupted run was saved "
                              f"({state['data']} -> {fingerprint}); restore them or delete the .state.pt file")
         best_val_loss, evals_without_improvement = state['best_val_loss'], state['evals_without_improvement']
-    logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None)
+    logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None, keep_until=start_iter)
 
     for it in range(start_iter, cfg.max_iters + 1):  # the last iteration only evaluates the final update
         if (it % cfg.eval_interval == 0 or it == cfg.max_iters) and not (state is not None and it == start_iter):

@@ -9,3 +9,6 @@ __pycache__/
 # training logs of the demo runs
 logs/
 *.tmp
+# corpora downloaded by `python -m charlm prepare-data` (data/input.txt is part of the repository)
+data/*
+!data/input.txt

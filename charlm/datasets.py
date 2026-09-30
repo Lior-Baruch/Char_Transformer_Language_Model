@@ -45,13 +45,14 @@ REPLACEMENTS = str.maketrans({
 # control characters: tabs become spaces, the others (except the newline) are dropped
 CONTROL = str.maketrans({**{chr(i): None for i in [*range(9), *range(11, 32), 127]}, '\t': ' '})
 END_OF_TEXT = '<|endoftext|>'  # TinyStories separates stories with this line
+FRACTION_SLASH = '\u2044'  # what NFKD puts between the digits of a fraction character
 
 
 def normalize(text):
     """ text -> printable ASCII plus newlines (see the module docstring) """
     if not text.isascii():
-        text = text.translate(REPLACEMENTS)
-        text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
+        text = unicodedata.normalize('NFKD', text.translate(REPLACEMENTS)).replace(FRACTION_SLASH, '/')
+        text = text.encode('ascii', 'ignore').decode('ascii')
     return text.translate(CONTROL)
 
 
@@ -120,23 +121,49 @@ def _open_url(url, timeout=60):
     return urllib.request.urlopen(request, timeout=timeout)
 
 
+def _read_url(url, writer, gutenberg):
+    """ stream a download into writer; raises if the connection ended before the whole file arrived """
+    with _open_url(url) as response:
+        stream = io.TextIOWrapper(response, encoding='utf-8', errors='replace')
+        _copy(stream, writer, gutenberg)
+        if not writer.full:
+            stream.read()  # the rest (e.g. a Gutenberg license), so the size check below sees the whole download
+            missing = getattr(response, 'length', None)  # bytes the server announced but never sent
+            if missing:
+                raise IOError(f"the download of {url} ended early ({missing:,} bytes missing); try again")
+
+
+def _copy(stream, writer, gutenberg=False):
+    start = time.time()
+    for block in _clean_blocks(stream, gutenberg):
+        before = writer.chars
+        writer.write(block)
+        if writer.chars // 100_000_000 > before // 100_000_000:
+            print(f"  {writer.chars / 1e6:,.0f}M characters | {time.time() - start:.0f}s", flush=True)
+        if writer.full:
+            return
+
+
 def prepare(source, out=None, files=(), url=None, max_chars=None, force=False):
     """ download (or read) a corpus, normalize it and write it to out; returns the path written.
     source: one of SOURCES or 'files'. url overrides the source's download address. max_chars stops early,
     e.g. to try a pipeline on part of TinyStories """
     if source == 'files':
-        if not files:
-            raise ValueError("the 'files' source needs --files")
-        if not out:
-            raise ValueError("the 'files' source needs --out")
+        if not files or not out:
+            raise ValueError("the 'files' source needs files to join and an output path (--files and --out)")
+        if url:
+            raise ValueError("the 'files' source reads local files; it takes no url")
     elif source not in SOURCES:
         raise ValueError(f"unknown source {source!r}; choose from {', '.join(SOURCES)} or files")
+    elif files:
+        raise ValueError(f"--files is only for the 'files' source, not {source!r}")
     spec = SOURCES.get(source, {})
     out = out or spec['out']
     url = url or spec.get('url')
     meta_path = os.path.splitext(out)[0] + '.json'
-    meta = {'source': source, 'url': None if source == 'files' else url, 'files': list(files),
-            'max_chars': max_chars}
+    meta = {'source': source, 'url': url, 'max_chars': max_chars,
+            # for local files, their sizes and modification times, so editing one prepares the output again
+            'files': [[path, os.path.getsize(path), int(os.path.getmtime(path))] for path in files]}
     if not force and os.path.exists(out) and os.path.exists(meta_path):
         with open(meta_path) as f:
             saved = json.load(f)
@@ -146,25 +173,24 @@ def prepare(source, out=None, files=(), url=None, max_chars=None, force=False):
 
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     tmp, start = out + '.tmp', time.time()
-    with open(tmp, 'w', encoding='ascii', newline='\n') as f:
-        writer = _Writer(f, max_chars)
-        inputs = [(path, lambda path=path: open(path, encoding='utf-8', errors='replace')) for path in files] \
-            if source == 'files' else [(url, lambda: io.TextIOWrapper(_open_url(url), encoding='utf-8',
-                                                                     errors='replace'))]
-        for name, opener in inputs:
-            print(f"reading {name}")
-            writer.blank_line()
-            with opener() as stream:
-                for block in _clean_blocks(stream, spec.get('gutenberg', False)):
-                    before = writer.chars
-                    writer.write(block)
-                    if writer.chars // 100_000_000 > before // 100_000_000:
-                        print(f"  {writer.chars / 1e6:,.0f}M characters | {time.time() - start:.0f}s", flush=True)
-                    if writer.full:
-                        break
-            if writer.full:
-                break
-    os.replace(tmp, out)
+    try:
+        with open(tmp, 'w', encoding='ascii', newline='\n') as f:
+            writer = _Writer(f, max_chars)
+            if source != 'files':
+                print(f"reading {url}")
+                _read_url(url, writer, spec.get('gutenberg', False))
+            for path in files:
+                print(f"reading {path}")
+                writer.blank_line()
+                with open(path, encoding='utf-8', errors='replace') as stream:
+                    _copy(stream, writer)
+                if writer.full:
+                    break
+        os.replace(tmp, out)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)  # a partial file is never left behind, or mistaken for a finished one
+        raise
     with open(meta_path, 'w') as f:
         json.dump({**meta, 'chars': os.path.getsize(out)}, f, indent=2)
     print(f"wrote {os.path.getsize(out):,} characters to {out} in {time.time() - start:.0f}s")

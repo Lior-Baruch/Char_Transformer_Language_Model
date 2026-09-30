@@ -480,3 +480,189 @@ def test_prepare_data_normalizes_and_skips_prepared_files(tmp_path):
     assert open(joined).read().startswith('Title\n') and '\n\nOne.\n' in open(joined).read()
     cli_main(['prepare-data', 'files', '--files', str(stories), '--out', str(tmp_path / 'cli.txt')])
     assert os.path.exists(tmp_path / 'cli.json')
+
+
+# --- review follow-ups --------------------------------------------------------------------------------------
+
+def _problem(e):
+    """ the arithmetic problem (op, a, b) behind a math example """
+    import re
+    if e.task == 'word':
+        a, op, b = re.match(r'(\d+)([-+*/])(\d+):', e.reasoning).groups()
+    else:
+        a, op, b = re.match(r'What is (\d+) ([-+*/]) (\d+)\?', e.prompt).groups()
+    return op, int(a), int(b)
+
+
+def test_held_out_problems_are_never_trained_in_any_task():
+    suite = TaskSuite(open(CORPUS).read())
+    trained = {_problem(e) for e in suite.sample(30000, MATH_TASKS, 'train', seed=1)}
+    held_out = [_problem(e) for e in suite.eval_set(200, MATH_TASKS)]
+    assert not [p for p in held_out if p in trained]
+    with pytest.raises(ValueError, match='eval_fraction'):
+        TaskSuite('some words here', eval_fraction=0)
+    import random
+    with pytest.raises(ValueError, match='split'):  # a split with no problems raises instead of looping forever
+        TaskSuite(open(CORPUS).read(), eval_fraction=0.0001).make('word', random.Random(0), 'eval')
+
+
+def test_finished_stage_with_other_settings_is_not_silently_reused(tmp_path):
+    corpus = tmp_path / 'corpus.txt'
+    corpus.write_text(open(CORPUS).read()[:100_000])
+    options = [f'data_path={corpus}', f'out_path={tmp_path / "base.pt"}', 'model.n_embd=16', 'model.n_head=2',
+               'model.n_layer=1', 'model.block_size=32', 'batch_size=4', 'max_iters=2', 'eval_iters=1',
+               'sample_tokens=0', 'device=cpu', 'resume=true']
+    pretrain(load_config(PretrainConfig, None, options))
+    pretrain(load_config(PretrainConfig, None, options + ['device=auto', 'state_every=3']))  # same run: skipped
+    with pytest.raises(ValueError, match='max_iters'):
+        pretrain(load_config(PretrainConfig, None, options + ['max_iters=3']))
+
+
+def test_resume_with_sparse_states_keeps_one_row_per_evaluation(tmp_path, monkeypatch):
+    import importlib
+    module = importlib.import_module('charlm.pretrain')  # the module, not the function of the same name
+    corpus = tmp_path / 'corpus.txt'
+    corpus.write_text(open(CORPUS).read()[:100_000])
+    options = [f'data_path={corpus}', 'model.n_embd=16', 'model.n_head=2', 'model.n_layer=1', 'model.block_size=32',
+               'batch_size=4', 'max_iters=8', 'eval_interval=2', 'eval_iters=1', 'sample_tokens=0', 'device=cpu',
+               'patience=0', 'state_every=2']
+    full, _ = pretrain(load_config(PretrainConfig, None, options + [f'out_path={tmp_path / "full.pt"}']))
+    real_step = module.optimizer_step
+
+    def crash_at_step_7(model, optimizer, loss, it, *args, **kwargs):
+        if it == 7:
+            raise KeyboardInterrupt
+        return real_step(model, optimizer, loss, it, *args, **kwargs)
+    monkeypatch.setattr(module, 'optimizer_step', crash_at_step_7)
+    resumed_options = options + [f'out_path={tmp_path / "resumed.pt"}', 'resume=true']
+    with pytest.raises(KeyboardInterrupt):  # the last state is from step 4, so step 6 is evaluated again on resume
+        pretrain(load_config(PretrainConfig, None, resumed_options))
+    monkeypatch.setattr(module, 'optimizer_step', real_step)
+    resumed, _ = pretrain(load_config(PretrainConfig, None, resumed_options))
+    steps = [json.loads(line)['step'] for line in open(tmp_path / 'resumed.metrics.jsonl')]
+    assert steps == [0, 2, 4, 6, 8]
+    assert all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), resumed.state_dict().values()))
+
+
+def test_old_state_without_a_new_nested_option_still_resumes(tmp_path):
+    from charlm.training import load_state, make_optimizer, save_state, state_path
+    cfg = PretrainConfig(out_path=str(tmp_path / 'm.pt'))
+    model = tiny_model()
+    optimizer = make_optimizer(model, cfg)
+    save_state(cfg.out_path, model, optimizer, 3, cfg)
+    state = torch.load(state_path(cfg.out_path), weights_only=True)
+    del state['config']['model']['dropout']  # as if ModelConfig.dropout had been added later
+    torch.save(state, state_path(cfg.out_path))
+    assert load_state(cfg.out_path, model, optimizer, 'cpu', cfg)[0] == 3
+
+
+@pytest.mark.parametrize('stage', ['dpo', 'grpo'])
+def test_resuming_from_the_last_state_keeps_the_final_metrics(stage, tmp_path, monkeypatch):
+    import importlib
+    module = importlib.import_module(f'charlm.{stage}')
+    corpus = tmp_path / 'corpus.txt'
+    corpus.write_text(open(CORPUS).read()[:200_000])
+    pretrain(load_config(PretrainConfig, None, [
+        f'data_path={corpus}', f'out_path={tmp_path / "base.pt"}', 'model.n_embd=16', 'model.n_head=2',
+        'model.n_layer=1', 'model.block_size=64', 'batch_size=4', 'max_iters=2', 'eval_iters=1', 'device=cpu',
+        'sample_tokens=0']))
+    config_cls = {'dpo': DPOConfig, 'grpo': GRPOConfig}[stage]
+    options = [f'corpus_path={corpus}', f'init_from={tmp_path / "base.pt"}', f'out_path={tmp_path / "out.pt"}',
+               'device=cpu', 'eval_per_task=1', 'max_iters=2', 'eval_interval=1', 'resume=true', 'batch_size=2']
+    options += {'dpo': ['n_pairs=6'], 'grpo': ['group_size=2', 'max_new_tokens=6']}[stage]
+    real_save = module.save_checkpoint
+
+    def crash(*args, **kwargs):  # interrupted after the last evaluation, before the model is saved
+        raise KeyboardInterrupt
+    monkeypatch.setattr(module, 'save_checkpoint', crash)
+    with pytest.raises(KeyboardInterrupt):
+        module.__dict__[stage](load_config(config_cls, None, options))
+    monkeypatch.setattr(module, 'save_checkpoint', real_save)
+    module.__dict__[stage](load_config(config_cls, None, options))
+    meta = load_checkpoint(str(tmp_path / 'out.pt'))[2]
+    assert meta['finished'] and 'acc' in meta and meta['iter'] == 2
+
+
+def test_grpo_micro_batches_give_the_same_update(tmp_path):
+    corpus = tmp_path / 'corpus.txt'
+    corpus.write_text(open(CORPUS).read()[:200_000])
+    pretrain(load_config(PretrainConfig, None, [
+        f'data_path={corpus}', f'out_path={tmp_path / "base.pt"}', 'model.n_embd=16', 'model.n_head=2',
+        'model.n_layer=1', 'model.block_size=64', 'batch_size=4', 'max_iters=2', 'eval_iters=1', 'device=cpu',
+        'sample_tokens=0']))
+    models = []
+    for micro_batch in (0, 4):
+        model, _ = grpo(load_config(GRPOConfig, None, [
+            f'corpus_path={corpus}', f'init_from={tmp_path / "base.pt"}', f'out_path={tmp_path / f"g{micro_batch}.pt"}',
+            'device=cpu', 'eval_per_task=0', 'max_iters=2', 'batch_size=3', 'group_size=3', 'max_new_tokens=6',
+            f'micro_batch={micro_batch}', 'learning_rate=0.01']))
+        models.append(model)
+    for a, b in zip(models[0].state_dict().values(), models[1].state_dict().values()):
+        assert torch.allclose(a, b, atol=1e-6)
+
+
+def test_prepare_data_rejects_truncated_downloads_and_redoes_edited_files(tmp_path):
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from charlm.datasets import normalize, prepare
+
+    class Truncated(BaseHTTPRequestHandler):
+        def do_GET(self):  # announces 1000 bytes but sends 12, as when a connection drops
+            self.send_response(200)
+            self.send_header('Content-Length', '1000')
+            self.end_headers()
+            self.wfile.write(b'Once upon a ')
+
+        def log_message(self, *args):
+            pass
+    server = HTTPServer(('127.0.0.1', 0), Truncated)
+    threading.Thread(target=server.handle_request, daemon=True).start()
+    out = tmp_path / 'stories.txt'
+    with pytest.raises(IOError, match='ended early'):
+        prepare('tinystories', str(out), url=f'http://127.0.0.1:{server.server_port}/x.txt')
+    server.server_close()
+    assert not out.exists() and not (tmp_path / 'stories.txt.tmp').exists()
+
+    text = tmp_path / 'mine.txt'
+    text.write_text('first version\n')
+    joined = str(tmp_path / 'joined.txt')
+    prepare('files', joined, files=[str(text)])
+    text.write_text('second, longer version\n')
+    prepare('files', joined, files=[str(text)])  # the input changed, so it is prepared again
+    assert open(joined).read() == 'second, longer version\n'
+    with pytest.raises(ValueError, match='only for'):
+        prepare('tinystories', files=[str(text)])
+    assert normalize('⅛ cup and 3⁄4') == '1/8 cup and 3/4'
+
+
+def test_paths_with_pattern_characters_are_read_as_files(tmp_path):
+    from charlm.data import expand_paths
+    odd = tmp_path / 'draft[1].txt'
+    odd.write_text('x')
+    folder = tmp_path / 'set[a]'
+    folder.mkdir()
+    (folder / 'f.txt').write_text('y')
+    assert expand_paths(str(odd)) == [str(odd)] and expand_paths(str(folder)) == [str(folder / 'f.txt')]
+
+
+def test_cli_shows_reasoning_and_writes_reasoning_data(tmp_path, capsys):
+    from charlm.cli import format_reply
+    assert format_reply('evol') == 'evol'
+    assert format_reply('<|think|>7+5+0=12 A=2 => 12<|/think|>12') == '[thinking: 7+5+0=12 A=2 => 12] 12'
+    assert format_reply('<|think|>7+5+0=1') == '[thinking, unfinished: 7+5+0=1]'
+    for flag in ([], ['--reasoning']):
+        out = tmp_path / f'data{len(flag)}.jsonl'
+        cli_main(['make-sft-data', '--out', str(out), '--n', '50', '--tasks', 'reverse', 'sub', '--device', 'cpu']
+                 + flag)
+        rows = read_jsonl(str(out))
+        assert any(r['task'] == 'sub' for r in rows)
+        assert all((THINK in r['response']) == (bool(flag) and r['task'] == 'sub') for r in rows)
+    model, tok = tiny_model(vocab_size=102, block_size=64), CharTokenizer()
+    tok.add_special_tokens(REASONING_TOKENS)
+    with torch.no_grad():  # a model that always starts to reason and never finishes
+        model.lm_head.bias[tok.stoi[THINK]] = 100.0
+    save_checkpoint(str(tmp_path / 'm.pt'), model, tok)
+    capsys.readouterr()
+    cli_main(['chat', '--model', str(tmp_path / 'm.pt'), 'What is 1 + 2?', '--device', 'cpu', '--max-new-tokens', '5'])
+    assert capsys.readouterr().out.startswith('[thinking, unfinished: ')

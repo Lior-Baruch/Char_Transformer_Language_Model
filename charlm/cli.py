@@ -47,12 +47,13 @@ def run_generate(args):
 
 
 def format_reply(reply):
-    """ a reply for printing: a reasoning model's scratchpad in brackets before its answer """
+    """ a reply for printing: a reasoning model's scratchpad in brackets before its answer. A scratchpad without
+    <|/think|> is unfinished: the model stopped early, or ran into --max-new-tokens or the end of its context """
     if THINK not in reply:
         return reply
     reasoning, answer = split_reply(reply)
     if END_THINK not in reply.split(THINK, 1)[1]:
-        return f"[thinking, cut off by --max-new-tokens: {reasoning}]"
+        return f"[thinking, unfinished: {reasoning}]"
     return f"[thinking: {reasoning}] {answer}"
 
 
@@ -97,7 +98,8 @@ def run_eval(args):
                              for t in args.tasks))
         for example, reply in list(zip(examples, replies))[::args.n_per_task][:args.show]:
             expected = format_response(example.answer, example.reasoning) if THINK in reply else example.answer
-            print(f"    {example.prompt!r}\n      -> {format_reply(reply)!r}\n      expected {format_reply(expected)!r}")
+            print(f"    {example.prompt!r}\n      -> {format_reply(reply)!r}"
+                  f"\n      expected {format_reply(expected)!r}")
 
 
 def run_make_sft_data(args):
@@ -110,7 +112,10 @@ def run_make_sft_data(args):
 
 
 def run_prepare_data(args):
-    prepare(args.source, args.out, args.files, args.url, args.max_chars, args.force)
+    try:
+        prepare(args.source, args.out, args.files, args.url, args.max_chars, args.force)
+    except ValueError as e:  # wrong arguments
+        raise SystemExit(f"error: {e}")
 
 
 def main(argv=None):
@@ -163,7 +168,7 @@ def main(argv=None):
                        description='download and clean a pretraining corpus: ' + ', '.join(SOURCES) +
                                    ', or your own --files (see charlm/datasets.py)')
     p.add_argument('source', choices=list(SOURCES) + ['files'])
-    p.add_argument('--out', help='output file (default: data/<source>.txt)')
+    p.add_argument('--out', help='output file (default: data/<source>.txt; required for files)')
     p.add_argument('--files', nargs='+', default=[], help="the .txt files to join, for the 'files' source")
     p.add_argument('--url', help='download from this address instead of the default')
     p.add_argument('--max-chars', type=int, default=None, help='stop after this many characters')
