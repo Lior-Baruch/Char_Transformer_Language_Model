@@ -29,7 +29,9 @@ class TrainConfig:
     # fp32, bf16, fp16 (with loss scaling) or auto: bf16 on GPUs that support it natively (A100, L4, ...),
     # fp16 on older GPUs (T4, V100), fp32 on CPU. 16-bit training is 2-8x faster on a GPU
     precision: str = "fp32"
-    resume: bool = False  # continue an interrupted run from its last saved state (*.state.pt); skips finished runs
+    # continue an interrupted run from its last saved state (*.state.pt); a finished run is skipped (or, if its
+    # settings differ, refused with an error rather than overwritten)
+    resume: bool = False
     state_every: int = 1  # save the resume state every this many evaluations (a large model's state is big)
 
 
@@ -74,7 +76,9 @@ def setup_precision(cfg, device, *models):
     return torch.cuda.amp.GradScaler(enabled=enabled and device.startswith('cuda'))
 
 
-IGNORED_SETTINGS = {'resume', 'device', 'precision', 'state_every'}  # they don't change what a run computes
+# settings that don't change what a run computes, so they may differ when resuming (micro_batch only splits the
+# work into parts, e.g. after running out of GPU memory; sample_tokens only prints a sample at the end)
+IGNORED_SETTINGS = {'resume', 'device', 'precision', 'state_every', 'micro_batch', 'sample_tokens'}
 
 
 def changed_settings(cfg, saved):
@@ -261,6 +265,14 @@ def metrics_path(out_path):
     return os.path.splitext(out_path)[0] + '.metrics.jsonl'
 
 
+def _step(line):
+    """ the step of a metrics row, or None for a row that was cut off (e.g. by a crash while writing it) """
+    try:
+        return json.loads(line)['step']
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
 class MetricsLogger:
     """ prints metrics and appends them as JSON lines to a file, for plotting and comparing runs.
     append continues an existing file; keep_until then first drops its rows after that step (a resumed run
@@ -275,9 +287,10 @@ class MetricsLogger:
                 open(path, 'w').close()
             elif keep_until is not None and os.path.exists(path):
                 with open(path) as f:
-                    rows = [line for line in f if line.strip() and json.loads(line)['step'] <= keep_until]
-                with open(path, 'w') as f:
-                    f.writelines(rows)
+                    rows = [line for line in f if _step(line) is not None and _step(line) <= keep_until]
+                with open(path + '.tmp', 'w') as f:  # replaced in one go, so a crash can't lose the old rows
+                    f.writelines(row if row.endswith('\n') else row + '\n' for row in rows)
+                os.replace(path + '.tmp', path)
 
     def log(self, step, **metrics):
         metrics = {k: float(v) if isinstance(v, torch.Tensor) else v for k, v in metrics.items()}

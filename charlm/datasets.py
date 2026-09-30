@@ -153,6 +153,9 @@ def prepare(source, out=None, files=(), url=None, max_chars=None, force=False):
             raise ValueError("the 'files' source needs files to join and an output path (--files and --out)")
         if url:
             raise ValueError("the 'files' source reads local files; it takes no url")
+        missing = [path for path in files if not os.path.isfile(path)]
+        if missing:
+            raise ValueError(f"not a file: {', '.join(missing)}")
     elif source not in SOURCES:
         raise ValueError(f"unknown source {source!r}; choose from {', '.join(SOURCES)} or files")
     elif files:

@@ -41,7 +41,7 @@ class GRPOConfig(TrainConfig):
     max_new_tokens: int = 32  # reply length limit (reasoning replies need ~100; a cut-off reply gets reward 0)
     updates_per_batch: int = 1  # optimizer steps on each batch of samples (the ratio is 1 when this is 1)
     # sequences per forward/backward pass in the update (0 = all batch_size x group_size at once); a smaller value
-    # needs less GPU memory and gives the same update
+    # needs less GPU memory and gives the same update, so it can be changed when resuming
     micro_batch: int = 0
     clip_eps: float = 0.2
     kl_coef: float = 0.04

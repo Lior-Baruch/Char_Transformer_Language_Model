@@ -666,3 +666,13 @@ def test_cli_shows_reasoning_and_writes_reasoning_data(tmp_path, capsys):
     capsys.readouterr()
     cli_main(['chat', '--model', str(tmp_path / 'm.pt'), 'What is 1 + 2?', '--device', 'cpu', '--max-new-tokens', '5'])
     assert capsys.readouterr().out.startswith('[thinking, unfinished: ')
+
+
+def test_memory_settings_may_change_on_resume_and_cut_off_metric_rows_are_dropped(tmp_path):
+    from charlm.training import MetricsLogger, changed_settings, to_dict
+    saved = to_dict(GRPOConfig(micro_batch=128))
+    assert changed_settings(GRPOConfig(micro_batch=64, device='cuda', precision='bf16'), saved) == []
+    path = tmp_path / 'm.metrics.jsonl'
+    path.write_text('{"step": 0, "acc": 0.1}\n{"step": 5, "acc": 0.2}\n{"step": 10, "ac')
+    MetricsLogger(str(path), append=True, keep_until=5).log(10, acc=0.3)
+    assert [json.loads(line)['step'] for line in open(path)] == [0, 5, 10]
