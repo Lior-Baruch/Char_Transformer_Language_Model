@@ -42,10 +42,10 @@ NODES = {  # name: (x, y, title, lines, accent series index or None)
     'data': (16, 158, 'data/input.txt', ['Tiny Shakespeare', '1.1M characters'], None),
     'base': (222, 150, 'base.pt', ['writes Shakespeare', 'val loss 1.48', '0% on the tasks'], None),
     'sft': (428, 80, 'sft.pt', ['follows instructions', '82% on 5 tasks', 'addition 13%'], 0),
-    'dpo': (634, 66, 'dpo.pt', ['82% on 5 tasks', 'addition 20%'], 0),
-    'grpo': (634, 170, 'grpo.pt', ['84% on 5 tasks', 'addition 24%'], 0),
+    'dpo': (634, 87.5, 'dpo.pt', ['82% on 5 tasks', 'addition 20%'], 0),
+    'grpo': (634, 176, 'grpo.pt', ['84% on 5 tasks', 'addition 24%'], 0),
     'sft_r': (428, 262, 'sft_reasoning.pt', ['thinks step by step', '+ - * /: 99-100%', 'word problems 22%'], 1),
-    'grpo_r': (634, 276, 'grpo_reasoning.pt', ['+ - * /: 99-100%', 'word problems 34%'], 1),
+    'grpo_r': (634, 269.5, 'grpo_reasoning.pt', ['+ - * /: 99-100%', 'word problems 34%'], 1),
 }
 EDGES = [('data', 'base', 'pretrain'), ('base', 'sft', 'SFT'), ('sft', 'dpo', 'DPO'), ('sft', 'grpo', 'GRPO'),
          ('base', 'sft_r', 'SFT with reasoning'), ('sft_r', 'grpo_r', 'GRPO')]
@@ -58,8 +58,8 @@ def node_height(lines):
 
 def model_map(t):
     fig, ax = canvas(t, 362, 'The example models in checkpoints/example/ and how each was made',
-                     'Each arrow is one training stage. Accuracy is measured on held-out prompts of the tasks the '
-                     'model was trained on.')
+                     'Each arrow is one training stage; accuracy is on held-out prompts. Blue: answers directly. '
+                     'Orange: reasons step by step.')
     fill = blend(t['grid'], t['surface'], 0.55)
     anchors = {}
     for name, (x, y, title, lines, accent) in NODES.items():
@@ -94,7 +94,7 @@ ANSWER = '132'
 def token_row(ax, t, x, y, tokens, cell=15, height=26):
     """ draw tokens left to right from (x, y); each token is (text, kind): kind 'prompt', 'think' or 'answer';
     a text longer than one character is a special token, drawn as one wider cell. Returns the end x """
-    fills = {'prompt': blend(t['grid'], t['surface'], 0.8), 'think': t['series'][1], 'answer': t['series'][0]}
+    fills = {'prompt': blend(t['muted'], t['surface'], 0.5), 'think': t['series'][1], 'answer': t['series'][0]}
     for text, kind in tokens:
         w = cell - 2 if len(text) == 1 else 9 + 6.2 * len(text)
         box(ax, t, x, y, w, height, fills[kind], radius=3)
@@ -113,13 +113,13 @@ def sft_tokens(t):
     prompt = [('<|user|>', 'prompt')] + [(c, 'prompt') for c in PROMPT] + [('<|assistant|>', 'prompt')]
     reply = ([('<|think|>', 'think')] + [(c, 'think') for c in TRACE] + [('<|/think|>', 'think')]
              + [(c, 'answer') for c in ANSWER] + [('<|end|>', 'answer')])
-    ax.text(16, 72, "the user's message: no loss (target -100)", color=t['ink2'], fontsize=8.5, va='top')
+    ax.text(16, 72, 'the prompt: no loss (target -100)', color=t['ink2'], fontsize=8.5, va='top')
     token_row(ax, t, 16, 90, prompt)
     ax.text(16, 132, 'the reply: the model learns to predict each of these tokens, one after another',
             color=t['ink2'], fontsize=8.5, va='top')
     token_row(ax, t, 16, 150, reply, cell=14.2)
     # legend: what the colors mean
-    fills = {'prompt': blend(t['grid'], t['surface'], 0.8), 'think': t['series'][1], 'answer': t['series'][0]}
+    fills = {'prompt': blend(t['muted'], t['surface'], 0.5), 'think': t['series'][1], 'answer': t['series'][0]}
     x = 16
     for kind, text in [('prompt', 'prompt (not trained on)'), ('think', 'reasoning (trained on)'),
                        ('answer', 'answer (trained on)')]:

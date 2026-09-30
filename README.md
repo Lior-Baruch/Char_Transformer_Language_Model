@@ -16,11 +16,11 @@ A small, readable PyTorch library for experimenting with the whole LLM training 
   <img alt="Diagram of the example models. data/input.txt (Tiny Shakespeare, 1.1M characters) is pretrained into base.pt (writes Shakespeare, val loss 1.48, 0% on the tasks). SFT turns it into sft.pt (82% on 5 tasks, addition 13%), which DPO turns into dpo.pt (82%, addition 20%) and GRPO into grpo.pt (84%, addition 24%). SFT with reasoning turns base.pt into sft_reasoning.pt (99-100% on addition, subtraction, multiplication and division; word problems 22%), which GRPO turns into grpo_reasoning.pt (word problems 34%)." src="docs/figures/example_models.png">
 </picture>
 
-- **Everything runs on a laptop CPU.** The example models in `checkpoints/example/` took about 70 minutes to train, and the two reasoning models about 75 more, and each stage measurably improves on the one before (see [Results](#results-of-the-example-models)).
-- **Step-by-step reasoning makes arithmetic work.** The same 1.8M-parameter model gets 4-31% of held-out additions, subtractions, multiplications and divisions right when it answers directly, and 99-100% when it writes out the steps (see [Reasoning](#reasoning-step-by-step)).
+- **Everything runs on a laptop CPU.** The four main models in `checkpoints/example/` (`base`, `sft`, `dpo`, `grpo`) took about 70 minutes to train, and the two reasoning models about 75 more. Each stage after SFT improves addition: 13% after SFT, 20% after DPO, 24% after GRPO (see [Results](#results-of-the-example-models)).
+- **Step-by-step reasoning makes arithmetic work.** The same 1.8M-parameter base model, fine-tuned two ways, gets 4-31% of held-out additions, subtractions, multiplications and divisions right (problems it never saw in training) when trained to answer directly, and 99-100% when trained to write out the steps (see [Reasoning](#reasoning-step-by-step)).
 - **A bigger model on a GPU.** [A Colab notebook](#a-bigger-model-on-a-gpu-colab) pretrains a 59M-parameter model on a billion characters of [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) and fine-tunes it to reason.
 
-**Contents:** [Install](#install) · [Quick start](#quick-start) · [Colab](#a-bigger-model-on-a-gpu-colab) · [Results](#results-of-the-example-models) · [Reasoning](#reasoning-step-by-step) · [Library](#using-it-as-a-library) · [How it works](#how-it-works) · [Experiment ideas](#experiment-ideas) · [Project layout](#project-layout)
+**Contents:** [Install](#install) · [Quick start](#quick-start) · [Colab](#a-bigger-model-on-a-gpu-colab) · [Your own data](#more-training-data) · [Results](#results-of-the-example-models) · [Reasoning](#reasoning-step-by-step) · [Library](#using-it-as-a-library) · [How it works](#how-it-works) · [Experiment ideas](#experiment-ideas) · [Project layout](#project-layout) · [Original notebook](#the-original-notebook)
 
 ## Install
 
@@ -39,7 +39,7 @@ Chat with the example models, or compare them on held-out prompts:
 python -m charlm chat --model checkpoints/example/grpo.pt "Reverse the word: prince"
 python -m charlm chat --model checkpoints/example/sft.pt          # interactive
 python -m charlm generate --model checkpoints/example/base.pt --prompt "ROMEO:" --max-new-tokens 300
-python -m charlm eval --model checkpoints/example/{sft,dpo,grpo}.pt --show 2
+python -m charlm eval --model checkpoints/example/sft.pt checkpoints/example/dpo.pt checkpoints/example/grpo.pt --show 2
 ```
 
 The reasoning model shows its work before answering:
@@ -51,7 +51,7 @@ python -m charlm chat --model checkpoints/example/sft_reasoning.pt "Adam has 12 
 # [thinking: 12/3: 01/3=0 r1 A=0, 12/3=4 r0 A=04 => 4] 4
 ```
 
-Train the whole pipeline yourself (each stage reads the previous stage's checkpoint):
+Train the whole pipeline yourself. SFT starts from `base.pt`, and DPO and GRPO each start from `sft.pt` (two alternative ways to improve it):
 
 ```bash
 python -m charlm pretrain --config configs/example/pretrain.json   # ~35 min on 4 CPU cores
@@ -60,6 +60,8 @@ python -m charlm dpo      --config configs/example/dpo.json
 python -m charlm grpo     --config configs/example/grpo.json
 ```
 
+These configs write to `checkpoints/example/`, so they replace the models that come with the repository (`git checkout checkpoints/example` restores them). To keep those, add `--set out_path=runs/base.pt` to each command and point the next stage at it with `init_from=runs/base.pt`, or copy the configs and change their paths.
+
 Any config option can be overridden from the command line, which makes quick experiments easy:
 
 ```bash
@@ -67,7 +69,14 @@ python -m charlm grpo --config configs/example/grpo.json --set kl_coef=0 group_s
 python -m charlm pretrain --config configs/example/pretrain.json --set model.n_layer=6 --print-config
 ```
 
-Each run writes a checkpoint (`out_path`) and its metrics as JSON lines next to it (`*.metrics.jsonl`), ready for plotting and comparing runs. Every stage also saves its full training state at each evaluation (`*.state.pt`, deleted when the run finishes; `state_every=N` saves it every N evaluations instead, for big models). If a run is interrupted, run the same command with `--set resume=true`. On a CPU it continues exactly where it left off, bit for bit. On a GPU the random-number state is restored too, but some GPU operations aren't deterministic, so the numbers can differ slightly. With `resume=true`, a stage that already finished with the same settings is skipped, so a whole pipeline can simply be rerun after a crash. If the settings changed, resuming stops with an error instead of mixing two different runs (or keeping a finished model trained with other settings): delete the old checkpoint, or set `resume=false`, to train again.
+Each run writes a checkpoint (`out_path`) and its metrics as JSON lines next to it (`*.metrics.jsonl`), ready for plotting and comparing runs. If a run is interrupted, run the same command with `--set resume=true`.
+
+<details>
+<summary>Resuming, in detail</summary>
+
+Every stage saves its full training state at each evaluation (`*.state.pt`, deleted when the run finishes; `state_every=N` saves it every N evaluations instead, for big models). On a CPU it continues exactly where it left off, bit for bit. On a GPU the random-number state is restored too, but some GPU operations aren't deterministic, so the numbers can differ slightly. With `resume=true`, a stage that already finished with the same settings is skipped, so a whole pipeline can simply be rerun after a crash. If the settings changed, resuming stops with an error instead of mixing two different runs (or keeping a finished model trained with other settings): delete the old checkpoint, or set `resume=false`, to train again.
+
+</details>
 
 Training uses the GPU automatically when there is one (`device` defaults to `auto`). `precision` sets the number format: `fp32` (the default), `bf16`, `fp16`, or `auto`, which picks bf16 on GPUs that support it natively (A100, L4, RTX 30xx and newer), fp16 with loss scaling on older ones (T4, V100) and fp32 on a CPU. 16-bit training is several times faster on a GPU. `configs/pretrain_gpu.json` is the original 10.8M-parameter model, for use on a GPU.
 
@@ -84,9 +93,11 @@ Training uses the GPU automatically when there is one (`device` defaults to `aut
 | SFT | all nine checkable tasks, with reasoning | ~20 min |
 | GRPO | the five math tasks, 32 prompts x 16 replies per step | ~30 min |
 
+A last, optional cell runs DPO instead of GRPO (`configs/colab/dpo.json`), on pairs of the correct reasoning and one of the model's own wrong replies.
+
 The times are estimates: this repository's own runs are on a CPU. An L4 is roughly three times slower, so the notebook has a `MAX_ITERS` setting to shorten pretraining. Training runs in bf16 (`"precision": "auto"`). Data and checkpoints are kept on Google Drive. If Colab disconnects, run all the cells again: finished stages are skipped and the interrupted one resumes from its last saved state.
 
-### More training data
+## More training data
 
 `prepare-data` downloads a corpus and cleans it to the tokenizer's characters (printable ASCII and newline: curly quotes become straight ones, accents are dropped, and so on):
 
@@ -102,10 +113,10 @@ The data is streamed, so it is never held in memory whole. A `.json` file next t
 
 ## Results of the example models
 
-All four models have 1.84M parameters (192-dim embeddings, 4 layers, 4 heads, 128-character context). They were trained on 4 CPU cores in about 70 minutes: pretraining 33 min, SFT 15, DPO 10, GRPO 11. Accuracy on 500 held-out prompts per task:
+The four main models have 1.84M parameters (192-dim embeddings, 4 layers, 4 heads, 128-character context). They were trained on 4 CPU cores in about 70 minutes: pretraining 33 min, SFT 15, DPO 10, GRPO 11. Accuracy on 500 held-out prompts per task:
 
 ```bash
-python -m charlm eval --model checkpoints/example/{base,sft,dpo,grpo}.pt --n-per-task 500
+python -m charlm eval --model checkpoints/example/base.pt checkpoints/example/sft.pt checkpoints/example/dpo.pt checkpoints/example/grpo.pt --n-per-task 500
 ```
 
 | model | reverse | uppercase | spell | length | add | overall |
@@ -120,11 +131,11 @@ python -m charlm eval --model checkpoints/example/{base,sft,dpo,grpo}.pt --n-per
   <img alt="Grouped bar chart of held-out accuracy per task for the SFT, DPO and GRPO models. All three are near 100% on reverse, uppercase, spell and length. On addition SFT scores 13%, DPO 20% and GRPO 24%." src="docs/figures/final_comparison.png">
 </picture>
 
-The accuracy curves below (SFT, DPO and GRPO) are measured during training on 100 held-out prompts per task (50 for SFT), so they are noisier than the 500-prompt table. The figures and example tables are generated by `docs/make_figures.py` and `docs/make_examples.py` from the files in `checkpoints/example/`.
+The accuracy curves below (SFT, DPO and GRPO) are measured during training on 100 held-out prompts per task (50 for SFT), so they are noisier than the 500-prompt table. The figures are drawn by `docs/make_figures.py`, `docs/make_reasoning_figures.py` and `docs/make_diagrams.py`, and the example tables printed by `docs/make_examples.py`, from the files in `checkpoints/example/` (`pip install matplotlib`, then e.g. `python docs/make_figures.py`).
 
 ### Pretraining
 
-The base model reaches val loss 1.477, the same as the original 10.8M-parameter notebook model (1.478) with a sixth of the parameters. The gap between training and validation loss keeps growing, so early stopping ended the run at step 3,750 and kept the best checkpoint, from step 3,000.
+The base model reaches val loss 1.477, the same as the original 10.8M-parameter notebook model (1.478) with a sixth of the parameters. Validation loss stopped improving after step 3,000 while training loss kept falling (the model starts to memorize the training text), so early stopping ended the run at step 3,750 and kept the best checkpoint, from step 3,000.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/pretraining_loss_dark.png">
@@ -243,23 +254,27 @@ The "Say a line as …" task has no single right answer, so DPO and GRPO don't t
 | Say a line as KING RICHARD III. | What is the country the countest? | Then I say, and so shall I stay. |
 | Say a line as Nurse. | I would I have so so. | I would I have so. |
 
-They sound Shakespearean, if not very meaningful. GRPO gives the same line for two different speakers.
+GRPO gives the same line for two different speakers.
 
 ## Reasoning step by step
 
-Does writing out the steps help a 1.8M-parameter model do arithmetic? To find out, two SFT runs start from the same `base.pt`, with the same 100,000 examples of nine tasks (`reverse`, `uppercase`, `spell`, `length` and the math tasks `add`, `sub`, `mul`, `div`, `word`), the same 5,000 steps and the same batch size. The only difference is the replies to the math tasks: the plain model answers directly, the reasoning model first writes the [scratchpad](#reasoning-tokens). Both then get 300 steps of GRPO on the five math tasks (16 prompts x 8 replies). Accuracy on 500 held-out prompts per task:
+Does writing out the steps help a 1.8M-parameter model do arithmetic? To find out, two SFT runs start from the same `base.pt`, with the same 100,000 examples of nine tasks (`reverse`, `uppercase`, `spell`, `length` and the math tasks `add`, `sub`, `mul`, `div`, `word`), the same 5,000 steps and the same batch size. The only difference is the replies to the math tasks: the plain model answers directly, the reasoning model first writes the [scratchpad](#reasoning-tokens). Both then get 300 steps of GRPO on the five math tasks (16 prompts x 8 replies). The plain model is its own run on the nine tasks, not the example `sft.pt` (which trained on five tasks and scores 13% on addition). Accuracy on 500 held-out prompts per task:
 
 ```bash
-python -m charlm sft --config configs/reasoning/sft_reasoning.json   # ~65 min on 2 CPU cores
-python -m charlm sft --config configs/reasoning/sft_plain.json       # ~35 min (not in the repository, only its metrics)
-python -m charlm grpo --config configs/reasoning/grpo_reasoning.json
-python -m charlm eval --model checkpoints/example/sft_reasoning.pt --tasks add sub mul div word --n-per-task 500 --show 5
+python -m charlm sft  --config configs/reasoning/sft_reasoning.json   # ~65 min on 2 CPU cores
+python -m charlm grpo --config configs/reasoning/grpo_reasoning.json  # ~13 min
+python -m charlm sft  --config configs/reasoning/sft_plain.json       # ~35 min; the plain models are not in the
+python -m charlm grpo --config configs/reasoning/grpo_plain.json      # ~5 min   repository, only their metrics
+python -m charlm eval --model checkpoints/example/sft_reasoning.pt --n-per-task 500 --max-new-tokens 100 --show 9 \
+    --tasks reverse uppercase spell length add sub mul div word
 ```
+
+Like the example configs, the reasoning configs write to `checkpoints/example/` and replace the models there.
 
 | model | reverse | uppercase | spell | length | add | sub | mul | div | word | overall |
 |---|---|---|---|---|---|---|---|---|---|---|
-| SFT | 99.2% | 100% | 100% | 100% | 8.0% | 4.4% | 30.6% | 20.6% | 4.4% | 51.9% |
-| SFT + GRPO | 98.8% | 100% | 99.8% | 100% | 10.4% | 5.6% | 31.0% | 24.4% | 3.4% | 52.6% |
+| plain SFT | 99.2% | 100% | 100% | 100% | 8.0% | 4.4% | 30.6% | 20.6% | 4.4% | 51.9% |
+| plain SFT + GRPO | 98.8% | 100% | 99.8% | 100% | 10.4% | 5.6% | 31.0% | 24.4% | 3.4% | 52.6% |
 | SFT + reasoning (`sft_reasoning.pt`) | 99.2% | 99.4% | 99.4% | 100% | **99.6%** | **100%** | **100%** | 99.0% | 21.6% | 90.9% |
 | SFT + reasoning + GRPO (`grpo_reasoning.pt`) | 99.0% | 99.4% | 99.4% | 100% | **99.6%** | **100%** | **100%** | **99.4%** | **33.8%** | **92.3%** |
 
@@ -268,23 +283,23 @@ python -m charlm eval --model checkpoints/example/sft_reasoning.pt --tasks add s
   <img alt="Grouped bar chart of held-out accuracy of four models on add, sub, mul, div, word and all nine tasks. The plain SFT model scores 4% to 31% on the arithmetic tasks, and GRPO barely changes that. Both reasoning models score 99% to 100%. On word problems the plain models score under 5%, the reasoning model 22% and 34% after GRPO. Overall: 52%, 53%, 91% and 92%." src="docs/figures/reasoning_final.png">
 </picture>
 
-**The scratchpad solves the arithmetic.** Without it, SFT gets 8% of held-out additions right, 4% of subtractions, 31% of multiplications and 21% of divisions. With it, 99-100% on all four, with numbers up to 999 (99 for addition). The model, the prompts and the number of steps are the same. The model also follows the method exactly: on add, sub, mul and div, 99-100% of its scratchpads are the taught trace, character for character.
+**The scratchpad solves the arithmetic.** Without it, SFT gets 8% of held-out additions right, 4% of subtractions, 31% of multiplications and 21% of divisions. With it, 99-100% on all four, with numbers up to 999 (99 for addition, and up to 8991 / 9 for division). The model, the prompts and the number of steps are the same. The model also follows the method exactly: on add, sub, mul and div, 99-100% of its scratchpads are the taught trace, character for character.
 
-Where does the plain model go wrong? Mostly in the low digits. It gets the size of the answer right: the digit of the highest place value is right 89-97% of the time. But an addition's ones digit is right only 9% of the time, about a random guess, and a subtraction's tens and ones digits 20% and 13%. Multiplication shows why: its ones digit is right almost always, because the last digit of `386 * 7` only depends on `6 * 7`, a times-table fact. The middle digits, which also depend on carries from the digits to their right, are right only half the time. With a scratchpad, each digit gets its own step, and each step only needs what was written just before it: `8*7=56+4=60` combines the digit, the multiplier and the carry from the step before.
+Where does the plain model go wrong? It gets the size of the answer right: 91-100% of its answers have the right number of digits, and when an answer has a hundreds digit (a thousands digit for multiplication), that digit is right 89-97% of the time. The lower digits are much worse: an addition's ones digit is right only 9% of the time, about a random guess, even though it depends on nothing but the two ones digits. A subtraction's tens and ones digits are right 20% and 13% of the time. Multiplication is the exception at the end: its ones digit is right almost always, because the last digit of `386 * 7` only depends on `6 * 7`, a times-table fact. Its middle digits are right only half the time. With a scratchpad, each digit gets its own step, computed from the two digits it combines and the carry written just before it: `8*7=56+4=60`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_digits_dark.png">
   <img alt="Four small grouped bar charts, one per arithmetic task, showing the share of held-out answers with each digit right, by place value. The reasoning model gets every digit right 99-100% of the time. The plain model gets the highest place value right 89-97% of the time, but the ones digit of an addition only 9%, the tens and ones of a subtraction 20% and 13%, the middle digits of a multiplication 54% and 50% (its ones digit 100%), and the tens and ones of a division 33% and 66%." src="docs/figures/reasoning_digits.png">
 </picture>
 
-Training curves show the same thing from another side: the reasoning model learns multiplication first (100% by step 2,000) and division last (step 4,250), while the plain model stays at or below 28% on every math task.
+During training, the reasoning model reaches 100% on multiplication first (step 2,000) and on division last (step 4,250), while the plain model stays at or below 28% on every math task.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_sft_dark.png">
-  <img alt="Five small line charts of held-out accuracy during SFT on add, sub, mul, div and word, for the plain and the reasoning model. The reasoning model reaches 100% on mul by step 2,000, on add and sub by step 3,250 and on div by step 4,250. The plain model stays at or below 28%. On word problems the reasoning model stays between 16% and 28% after step 1,000, and the plain one under 6%." src="docs/figures/reasoning_sft.png">
+  <img alt="Five small line charts of held-out accuracy during SFT on add, sub, mul, div and word, for the plain and the reasoning model. The reasoning model reaches 100% on mul by step 2,000, on add and sub by step 3,250 and on div by step 4,250. The plain model stays at or below 28%. On word problems the reasoning model stays between 16% and 28% after step 1,000, and the plain one at or below 6%." src="docs/figures/reasoning_sft.png">
 </picture>
 
-**The price is length.** A reasoning reply to a math question is 39-73 tokens instead of 3-5, about 15 times longer. Training on the longer replies took almost twice as long on the same hardware (63 minutes instead of 36), and every answer takes that many more steps to generate.
+**The price is length.** A reasoning reply averages 39-73 tokens per math task, against 3-5 for a direct answer, about 15 times longer. Training on the longer replies took almost twice as long on the same hardware (63 minutes instead of 36), and every answer takes that many more steps to generate.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_cost_dark.png">
@@ -301,29 +316,29 @@ Training curves show the same thing from another side: the reasoning model learn
 <details>
 <summary>The numbers</summary>
 
-| model | phrasing | accuracy | reads the story right (right equation) | + | - | * | / |
+| model | phrasing | accuracy | first equation has the right value | + | - | * | / |
 |---|---|---|---|---|---|---|---|
 | SFT + reasoning | never trained on | 22% | 28% | 25% | 2% | 1% | 60% |
 | SFT + reasoning | trained on | 98% | 100% | 100% | 100% | 100% | 92% |
 | SFT + reasoning + GRPO | never trained on | 34% | 33% | 45% | 1% | 22% | 71% |
 | SFT + reasoning + GRPO | trained on | 97% | 100% | 100% | 100% | 100% | 89% |
 
-"Reads the story right" means the equation the model writes first (like `12/3:`) has the right result.
+The equation column checks the equation the model writes first (like `12/3:`) by its result. A few replies write an equation with the wrong result but still reach the right answer, so accuracy can be slightly higher than that column.
 
 </details>
 
 With the new phrasing, the model mostly writes the wrong equation first. It reads "There are 7 marbles and 8 more arrive" as `87+8`, and "Adam puts 20 stickers into 5 equal groups" as `20+5`. Three phrasings per operation are not enough for a character-level model to learn what the words mean. More phrasings, or a bigger model pretrained on more English (like the [Colab model](#a-bigger-model-on-a-gpu-colab)), are the natural next experiments.
 
-**GRPO has little left to teach, but it helps with the new phrasing.** The reasoning model already gets 99% of its sampled training replies right, so only ~5% of the groups contain both a right and a wrong reply, and only those carry a learning signal. The arithmetic stays at 99-100%. Still, held-out word problems rise from 22% to 34%, although GRPO trains only on the three training phrasings. The gain comes from reading the new phrasing better: multiplication stories go from 1% to 22%, addition stories from 25% to 45%. The plain model's GRPO run goes nowhere: its reward stays near 20%, and no task's held-out accuracy moves by more than 4 points. GRPO took 5 minutes for the plain model and 13 for the reasoning one.
+**GRPO has little left to teach, but it helps with the new phrasing.** The reasoning model already gets 99% of its sampled training replies right, so only ~5% of the groups contain both a right and a wrong reply, and only those carry a learning signal. The arithmetic stays at 99-100%. Still, held-out word problems rise from 22% to 34%, although GRPO trains only on the three training phrasings. The gains have different causes. Multiplication stories go from 1% to 22% because the model now reads them right: its first equation is right 22% of the time instead of 1%. Addition stories go from 25% to 45% although the model writes the right equation just as often (50% before, 49% after): it now finishes the sum it wrote more often. The plain model's GRPO run goes nowhere: its reward stays near 20%, and no task's held-out accuracy moves by more than 4 points. GRPO took 5 minutes for the plain model and 13 for the reasoning one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_grpo_dark.png">
   <img alt="Three line charts over 300 GRPO steps. Reward: the reasoning model gets 98-99% of its sampled replies right throughout, the plain model 16-22%. Groups with both right and wrong replies: 31-40% for the plain model, 3-8% for the reasoning model. Held-out word problems in the new phrasing: the reasoning model rises from 18% to 28% (50 prompts), the plain model stays at 0-4%." src="docs/figures/reasoning_grpo.png">
 </picture>
 
-Replies of the two SFT models to the first held-out prompts of each math task (greedy):
+Replies of the plain and the reasoning SFT model to the first held-out prompts of each math task (greedy):
 
-| prompt | expected | SFT | SFT + reasoning |
+| prompt | expected | plain SFT | SFT + reasoning |
 |---|---|---|---|
 | What is 65 + 11? | `76` | `78` ✗ | `<\|think\|>5+1+0=06 A=6, 6+1+0=07 A=076 => 76<\|/think\|>76` ✓ |
 | What is 83 + 41? | `124` | `127` ✗ | `<\|think\|>3+1+0=04 A=4, 8+4+0=12 A=124 => 124<\|/think\|>124` ✓ |
@@ -513,7 +528,7 @@ char_transformer_language_model.ipynb   the original self-contained notebook wal
 
 Run the tests with `pip install pytest && pytest tests`. GitHub Actions also runs them, together with the `pyflakes` linter, on every pull request and every push to `master` (`.github/workflows/tests.yml`).
 
-## The notebook
+## The original notebook
 
 `char_transformer_language_model.ipynb` builds and trains the pretraining model step by step in a single file, without the library. It is a good place to start reading.
 

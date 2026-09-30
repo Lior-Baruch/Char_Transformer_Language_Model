@@ -90,9 +90,10 @@ def legend(fig, t, labels, y=None, kind='line'):
 
 def line(ax, t, x, y, color, end_label=None, dot=True):
     """ a 2px line with a ringed end-dot and an optional end label (in text ink, not the series color) """
-    ax.plot(x, y, color=color, lw=2 * PX, solid_capstyle='round', solid_joinstyle='round', zorder=3)
+    # clip_on=False: a line or dot at the edge of the range (e.g. 100%) is drawn whole, not cut in half
+    ax.plot(x, y, color=color, lw=2 * PX, solid_capstyle='round', solid_joinstyle='round', zorder=3, clip_on=False)
     if dot:
-        ax.plot(x[-1], y[-1], 'o', ms=10 * PX, mfc=color, mec=t['surface'], mew=2 * PX, zorder=4)
+        ax.plot(x[-1], y[-1], 'o', ms=10 * PX, mfc=color, mec=t['surface'], mew=2 * PX, zorder=4, clip_on=False)
     if end_label:
         ax.annotate(end_label, (x[-1], y[-1]), xytext=(7, 0), textcoords='offset points', va='center',
                     color=t['ink2'], fontsize=8.5, annotation_clip=False)
@@ -195,7 +196,9 @@ def grpo_comparison(t):
     axes[0].set_yticks(range(0, 31, 10))
     axes[0].set_yticklabels([f'{v}%' for v in range(0, 31, 10)])
     panel_title(axes[1], t, 'KL divergence from the SFT model (per token)')
-    axes[1].set_ylim(0, 1.0)
+    axes[1].set_ylim(-0.03, 1.0)  # a little room, so the run near 0 clears the axis
+    for ax in axes:
+        ax.set_xlim(-20, 620)
     for ax in axes:
         axis_label(ax, t, x='GRPO step')
     return fig

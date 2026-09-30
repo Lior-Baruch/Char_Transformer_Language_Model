@@ -22,6 +22,10 @@ from make_figures import (EXAMPLE, OUT, ROOT, THEMES, axis_label, column, legend
 
 MODELS = [('SFT', 'experiments/sft_plain'), ('SFT + GRPO', 'experiments/grpo_plain'),
           ('SFT + reasoning', 'sft_reasoning'), ('SFT + reasoning + GRPO', 'grpo_reasoning')]
+# the names shown in the figures and tables (the labels above are the keys of the saved results): the plain models
+# are a new run on the nine tasks, not the example sft.pt and grpo.pt
+SHOW = {'SFT': 'plain SFT', 'SFT + GRPO': 'plain SFT + GRPO'}
+show = lambda label: SHOW.get(label, label)
 TASKS = ['reverse', 'uppercase', 'spell', 'length', 'add', 'sub', 'mul', 'div', 'word']
 MATH = ['add', 'sub', 'mul', 'div', 'word']
 EVAL_PER_TASK = 500
@@ -63,7 +67,7 @@ def sft_curves(t):
                            'Measured every 250 steps on 50 held-out prompts per task. Same data, steps and '
                            'batch size; only the replies differ.', ncols=5, height=3.3, top=0.62, wspace=0.35)
     fig.subplots_adjust(right=0.97)
-    legend(fig, t, [name for name, _ in runs], y=0.79)
+    legend(fig, t, [show(name) for name, _ in runs], y=0.79)
     for ax, task in zip(axes, MATH):
         for color, (_, rows) in zip(t['series'], runs):
             x, acc = column(rows, f'acc/{task}', 100)
@@ -85,7 +89,7 @@ def grpo_curves(t):
                            'anything), and held-out word problems.', ncols=3, height=3.4,
                            top=0.64, wspace=0.45)
     fig.subplots_adjust(right=0.93)
-    legend(fig, t, [name for name, _ in runs], y=0.8)
+    legend(fig, t, [show(name) for name, _ in runs], y=0.8)
     for color, (_, rows) in zip(t['series'], runs):
         x, reward = column(rows, 'reward', 100)
         line(axes[0], t, x, reward, color, f'{reward[-1]:.0f}%')
@@ -96,6 +100,11 @@ def grpo_curves(t):
     panel_title(axes[0], t, 'reward (correct sampled replies)')
     panel_title(axes[1], t, 'groups with a learning signal')
     panel_title(axes[2], t, 'word problems, new phrasing')
+    for ax in axes:
+        ax.set_xlim(-15, 315)
+        ax.set_xticks([0, 100, 200, 300])
+        if ax is not axes[0]:
+            ax.set_yticklabels([])  # the three panels share the 0-100% scale
     for ax in axes:
         percent_axis(ax)
         axis_label(ax, t, x='GRPO step')
@@ -111,7 +120,7 @@ def blend(color, other, amount):
 def tint(t, color):
     """ a lighter shade of a series color, for the "before" state: mixed with the surface on the light theme, and
     with white on the dark one (mixing with a dark surface would make it too dim to see) """
-    return blend(color, t['surface'], 0.45) if t is THEMES['light'] else blend(color, '#ffffff', 0.5)
+    return blend(color, t['surface'], 0.6) if t is THEMES['light'] else blend(color, '#ffffff', 0.5)
 
 
 def final_bars(t, results):
@@ -123,7 +132,7 @@ def final_bars(t, results):
                             'Word problems use a phrasing never seen in training. "all 9 tasks" adds reverse, '
                             'uppercase, spell and length.')
     fig.subplots_adjust(right=0.97)
-    legend(fig, dict(t, series=series), labels, y=0.83, kind='bar')
+    legend(fig, dict(t, series=series), [show(label) for label in labels], y=0.83, kind='bar')
     ax.set_xlim(-0.5, len(groups) - 0.5)
     percent_axis(ax)
     fig.canvas.draw()
@@ -153,7 +162,7 @@ def tables(results):
     print('|---|' + '---|' * (len(TASKS) + 1))
     for label in labels:
         m = results['models'][label]['metrics']
-        print(f'| {label} | ' + ' | '.join(f"{100 * m[f'acc/{t}']:.1f}%" for t in TASKS)
+        print(f'| {show(label)} | ' + ' | '.join(f"{100 * m[f'acc/{t}']:.1f}%" for t in TASKS)
               + f" | {100 * m['acc']:.1f}% |")
     print('\nreasoning matches the taught method:')
     for label in labels:
@@ -169,7 +178,7 @@ def examples(results, per_task=2):
     suite = TaskSuite(open(os.path.join(ROOT, 'data', 'input.txt')).read())
     eval_set = suite.eval_set(EVAL_PER_TASK, TASKS)[::EVAL_PER_TASK // 50]  # the prompts whose replies were kept
     shown = [(i, e) for task in MATH for i, e in [(i, e) for i, e in enumerate(eval_set) if e.task == task][:per_task]]
-    print('\n| prompt | expected | SFT | SFT + reasoning |')
+    print('\n| prompt | expected | plain SFT | SFT + reasoning |')
     print('|---|---|---|---|')
     for i, e in shown:
         replies = [results['models'][label]['replies'][i] for label in ('SFT', 'SFT + reasoning')]
@@ -238,16 +247,18 @@ def word_phrasings(label='SFT + reasoning', quiet=False):
                                                        max_new_tokens=MAX_NEW_TOKENS, temperature=0.0)]
             right = [score(e, r) for e, r in zip(examples, replies)]
             equations = [equation_value(split_reply(r)[0]) == int(e.answer) for e, r in zip(examples, replies)]
-            per_op = {op: [x for x, e in zip(right, examples) if equation(e)[1] == op] for op in '+-*/'}
+            of_op = lambda values, op: [x for x, e in zip(values, examples) if equation(e)[1] == op]
             out[name] = {'acc': sum(right) / len(right), 'equation': sum(equations) / len(equations),
-                         'per_op': {op: sum(v) / len(v) for op, v in per_op.items()},
-                         'n_per_op': {op: len(v) for op, v in per_op.items()}}
+                         'per_op': {op: sum(of_op(right, op)) / len(of_op(right, op)) for op in '+-*/'},
+                         'equation_per_op': {op: sum(of_op(equations, op)) / len(of_op(equations, op))
+                                             for op in '+-*/'},
+                         'n_per_op': {op: len(of_op(right, op)) for op in '+-*/'}}
         return out
     result = cached('word_phrasings', label, compute)
     if quiet:
         return result
     print(f'\n{label}: word problems with held-out numbers')
-    print('| phrasing | accuracy | reads the story right | + | - | * | / |')
+    print('| phrasing | accuracy | first equation has the right value | + | - | * | / |')
     print('|---|---|---|---|---|---|---|')
     for name, title in [('new', 'never trained on'), ('trained', 'trained on')]:
         r = result[name]
@@ -304,10 +315,10 @@ def kept_tasks():
 def digits_figure(t):
     plain, reasoning = digit_accuracy('SFT'), digit_accuracy('SFT + reasoning')
     fig, axes = new_figure(t, 'Without reasoning, the leading digit is usually right and the others often wrong',
-                           'Share of held-out answers with each digit right, by place value (500 prompts per task). '
-                           'Answers are written left to right.', ncols=4, height=3.4, top=0.64, wspace=0.18)
+                           'Share of held-out answers with each digit right, by place value (of the answers that have '
+                           'that place).', ncols=4, height=3.4, top=0.64, wspace=0.18)
     fig.subplots_adjust(right=0.98, left=0.07)
-    legend(fig, t, ['SFT', 'SFT + reasoning'], y=0.8, kind='bar')
+    legend(fig, t, ['plain SFT', 'SFT + reasoning'], y=0.8, kind='bar')
     fig.canvas.draw()
     names = {'add': 'add (up to 99 + 99)', 'sub': 'sub (up to 999 - 999)', 'mul': 'mul (up to 999 x 9)',
              'div': 'div (up to 8991 / 9)'}
@@ -344,7 +355,7 @@ def cost_figure(t, results):
                             'Average reply length in tokens (bars) and held-out accuracy (labels), per math task.',
                             height=3.6, top=0.72)
     fig.subplots_adjust(left=0.1, right=0.97)
-    legend(fig, t, [label for label, _ in runs], y=0.85, kind='bar')
+    legend(fig, t, [show(label) for label, _ in runs], y=0.85, kind='bar')
     ax.set_ylim(-0.6, len(rows) - 0.4)
     ax.set_xlim(0, 100)
     ax.grid(axis='y', visible=False)
@@ -407,12 +418,14 @@ def word_figure(t):
     ax.set_xticklabels([f'{v}%' for v in range(0, 101, 25)])
     for r, (op, name) in enumerate(ops[::-1]):
         values = [100 * data['per_op'][op] for _, _, data in series]
-        ax.plot([min(values), max(values)], [r, r], color=t['grid'], lw=3 * 72 / 100, solid_capstyle='round',
-                zorder=2)
+        ax.plot([min(values), max(values)], [r, r], color=t['axis'], lw=3 * 72 / 100, solid_capstyle='round',
+                zorder=2, clip_on=False)
         for (_, color, _), value in zip(series, values):
-            ax.plot(value, r, 'o', ms=11 * 72 / 100, mfc=color, mec=t['surface'], mew=2 * 72 / 100, zorder=3)
-        ax.annotate(f'{values[1]:.0f}% \u2192 {values[2]:.0f}%', (min(values[1:]), r), xytext=(0, -13),
-                    textcoords='offset points', ha='center', color=t['ink2'], fontsize=8)
+            ax.plot(value, r, 'o', ms=11 * 72 / 100, mfc=color, mec=t['surface'], mew=2 * 72 / 100, zorder=3,
+                    clip_on=False)
+        x = min(values[1:])
+        ax.annotate(f'{values[1]:.0f}% \u2192 {values[2]:.0f}%', (x, r), xytext=(-4 if x < 10 else 0, -13),
+                    textcoords='offset points', ha='left' if x < 10 else 'center', color=t['ink2'], fontsize=8)
     ax.set_yticks(range(len(ops)))
     ax.set_yticklabels([name for _, name in ops[::-1]])
     ax.tick_params(axis='y', labelsize=9, labelcolor=t['ink'])
