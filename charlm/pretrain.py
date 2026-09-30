@@ -68,8 +68,8 @@ def pretrain(cfg):
         best_val_loss, evals_without_improvement = state['best_val_loss'], state['evals_without_improvement']
     logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None)
 
-    for it in range(start_iter, cfg.max_iters):
-        if (it % cfg.eval_interval == 0 or it == cfg.max_iters - 1) and not (state is not None and it == start_iter):
+    for it in range(start_iter, cfg.max_iters + 1):  # the last iteration only evaluates the final update
+        if (it % cfg.eval_interval == 0 or it == cfg.max_iters) and not (state is not None and it == start_iter):
             losses = estimate_loss(model, splits, cfg, device)
             logger.log(it, train_loss=losses['train'], val_loss=losses['val'])
             # keep the model with the lowest val loss, and stop once it stops improving
@@ -84,6 +84,8 @@ def pretrain(cfg):
                     break
             save_state(cfg.out_path, model, optimizer, it, to_dict(cfg), best_val_loss=best_val_loss,
                        evals_without_improvement=evals_without_improvement)
+        if it == cfg.max_iters:
+            break
 
         x, y = get_text_batch(splits['train'], cfg.batch_size, model.config.block_size, device)
         _, loss = model(x, y)

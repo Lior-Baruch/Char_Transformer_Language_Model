@@ -80,8 +80,37 @@ def save_state(out_path, model, optimizer, it, config, **extra):
     """ everything needed to continue a run from iteration it: weights, optimizer, random-number generators, the
     run's config (a dict) and any stage-specific values (a random.Random in extra is stored by its state) """
     extra = {k: ('py_rng', v.getstate()) if isinstance(v, random.Random) else v for k, v in extra.items()}
-    torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'torch_rng': torch.get_rng_state(),
+    torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'rng': _get_rng_states(),
                 'iter': it, 'config': config, 'extra': extra}, state_path(out_path))
+
+
+def _mps_available():
+    return getattr(torch.backends, 'mps', None) is not None and torch.backends.mps.is_available()
+
+
+def _get_rng_states():
+    """ torch's random-number generators: the CPU one and, when present, the GPU ones (dropout and sampling on a
+    GPU draw from those) """
+    states = {'cpu': torch.get_rng_state()}
+    if torch.cuda.is_available():
+        states['cuda'] = torch.cuda.get_rng_state_all()
+    if _mps_available():
+        states['mps'] = torch.mps.get_rng_state()
+    return states
+
+
+def _set_rng_states(states):
+    torch.set_rng_state(states['cpu'].cpu())
+    restored = {'cpu'}
+    if 'cuda' in states and torch.cuda.is_available() and len(states['cuda']) == torch.cuda.device_count():
+        torch.cuda.set_rng_state_all([s.cpu() for s in states['cuda']])
+        restored.add('cuda')
+    if 'mps' in states and _mps_available():
+        torch.mps.set_rng_state(states['mps'].cpu())
+        restored.add('mps')
+    if restored != set(_get_rng_states()) or restored != set(states):
+        print("note: resuming on different hardware than the run was saved on, so random draws (dropout, "
+              "sampling) will differ from an uninterrupted run")
 
 
 def load_state(out_path, model, optimizer, device, config, **rngs):
@@ -100,7 +129,7 @@ def load_state(out_path, model, optimizer, device, config, **rngs):
                          f"restore those settings to resume it, or delete the file to start over")
     model.load_state_dict(state['model'])
     optimizer.load_state_dict(state['optimizer'])
-    torch.set_rng_state(state['torch_rng'].cpu())
+    _set_rng_states(state['rng'])
     extra = {}
     for k, v in state['extra'].items():
         if isinstance(v, (tuple, list)) and len(v) == 2 and v[0] == 'py_rng':

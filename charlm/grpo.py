@@ -78,7 +78,10 @@ def grpo(cfg):
     set_seed(cfg.seed)
     device = resolve_device(cfg.device)
     model, tokenizer, _ = load_checkpoint(cfg.init_from, device, dropout=cfg.dropout)
-    ref_model, _, _ = load_checkpoint(cfg.ref_from or cfg.init_from, device, dropout=0.0)
+    ref_model, ref_tokenizer, _ = load_checkpoint(cfg.ref_from or cfg.init_from, device, dropout=0.0)
+    if ref_tokenizer.to_dict() != tokenizer.to_dict():
+        raise ValueError("the reference model's tokenizer differs from the policy's, so their "
+                         "log-probabilities can't be compared")
     ref_model.eval().requires_grad_(False)
     suite = TaskSuite(load_text(cfg.corpus_path))
     eval_set = suite.eval_set(cfg.eval_per_task) if cfg.eval_per_task else []  # all tasks, not just trained ones

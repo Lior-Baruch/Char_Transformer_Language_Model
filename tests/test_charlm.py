@@ -6,7 +6,7 @@ import torch
 
 from charlm import (CharTokenizer, CharTransformerLanguageModel, DPOConfig, GRPOConfig, ModelConfig, PretrainConfig,
                     SFTConfig, TaskSuite, dpo, encode_chat_example, grpo, load_checkpoint, load_config, pretrain,
-                    save_checkpoint, score, sft)
+                    sample_replies, save_checkpoint, score, sft)
 from charlm.cli import main as cli_main
 from charlm.dpo import dpo_loss
 from charlm.grpo import group_advantages, grpo_loss
@@ -182,7 +182,50 @@ def test_resumed_run_matches_uninterrupted_run(stage, tmp_path, monkeypatch):
     logs = [[{k: v for k, v in json.loads(line).items() if k != 'time'}
              for line in open(tmp_path / f'{name}.metrics.jsonl')] for name in ('full', 'resumed')]
     assert logs[0] == logs[1]
-    assert [row['step'] for row in logs[0]] == ([0, 3, 6, 7] if stage in ('pretrain', 'sft') else [0, 3, 6, 8])
+    assert [row['step'] for row in logs[0]] == [0, 3, 6, 8]  # 8 evaluates the final update
+
+
+@pytest.mark.parametrize('stage', ['pretrain', 'sft'])
+def test_final_update_is_evaluated_and_kept(stage, tmp_path):
+    """ with a single training step, the returned model must include that step """
+    import json
+    corpus = tmp_path / 'corpus.txt'
+    corpus.write_text(open(CORPUS).read()[:200_000])
+    tiny = [f'data_path={corpus}', 'model.n_embd=16', 'model.n_head=2', 'model.n_layer=1', 'model.block_size=64',
+            'batch_size=4', 'eval_iters=2', 'sample_tokens=0', 'device=cpu', 'patience=0']
+    pretrain(load_config(PretrainConfig, None, tiny + [f'out_path={tmp_path / "base.pt"}', 'max_iters=2']))
+    one_step = ['max_iters=1', 'eval_interval=1', 'learning_rate=0.1', 'warmup_iters=0',
+                f'out_path={tmp_path / "out.pt"}']
+    if stage == 'pretrain':
+        config = load_checkpoint(str(tmp_path / 'base.pt'))[0].config
+        torch.manual_seed(1337)  # pretrain seeds the same way before building its model, so this is its starting point
+        before = CharTransformerLanguageModel(config)
+        after, _ = pretrain(load_config(PretrainConfig, None, tiny + one_step))
+    else:
+        before = load_checkpoint(str(tmp_path / 'base.pt'))[0]
+        after, _ = sft(load_config(SFTConfig, None, [f'corpus_path={corpus}', f'init_from={tmp_path / "base.pt"}',
+                                                     'n_train=16', 'n_val=4', 'batch_size=4', 'eval_per_task=0',
+                                                     'device=cpu', 'patience=0'] + one_step))
+    assert [json.loads(line)['step'] for line in open(tmp_path / 'out.metrics.jsonl')] == [0, 1]
+    assert not all(torch.equal(a, b) for a, b in zip(before.state_dict().values(), after.state_dict().values()))
+
+
+def test_prompt_without_room_for_a_reply_is_rejected():
+    model = tiny_model(block_size=16)
+    with pytest.raises(ValueError, match='no room'):
+        sample_replies(model, CharTokenizer(), ['x' * 20])
+
+
+@pytest.mark.parametrize('stage', ['dpo', 'grpo'])
+def test_reference_model_with_another_tokenizer_is_rejected(stage, tmp_path):
+    tok = CharTokenizer()
+    reordered = CharTokenizer(special_tokens=list(reversed(tok.special_tokens)))  # same size, different ids
+    save_checkpoint(str(tmp_path / 'policy.pt'), tiny_model(), tok)
+    save_checkpoint(str(tmp_path / 'ref.pt'), tiny_model(), reordered)
+    config_cls, run = {'dpo': (DPOConfig, dpo), 'grpo': (GRPOConfig, grpo)}[stage]
+    with pytest.raises(ValueError, match='tokenizer'):
+        run(load_config(config_cls, None, [f'init_from={tmp_path / "policy.pt"}', f'ref_from={tmp_path / "ref.pt"}',
+                                           f'out_path={tmp_path / "out.pt"}', f'corpus_path={CORPUS}', 'device=cpu']))
 
 
 def test_full_pipeline(tmp_path):

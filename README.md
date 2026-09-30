@@ -55,7 +55,7 @@ python -m charlm grpo --config configs/example/grpo.json --set kl_coef=0 group_s
 python -m charlm pretrain --config configs/example/pretrain.json --set model.n_layer=6 --print-config
 ```
 
-Each run writes a checkpoint (`out_path`) and its metrics as JSON lines next to it (`*.metrics.jsonl`), ready for plotting and comparing runs. Every stage also saves its full training state at each evaluation (`*.state.pt`, deleted when the run finishes). If a run is interrupted, run the same command with `--set resume=true`; it continues exactly where it left off. `configs/pretrain_gpu.json` is the original 10.8M-parameter model, for use on a GPU.
+Each run writes a checkpoint (`out_path`) and its metrics as JSON lines next to it (`*.metrics.jsonl`), ready for plotting and comparing runs. Every stage also saves its full training state at each evaluation (`*.state.pt`, deleted when the run finishes). If a run is interrupted, run the same command with `--set resume=true`. On a CPU it continues exactly where it left off, bit for bit. On a GPU the random-number state is restored too, but some GPU operations aren't deterministic, so the numbers can differ slightly. `configs/pretrain_gpu.json` is the original 10.8M-parameter model, for use on a GPU.
 
 ## Results of the example models
 

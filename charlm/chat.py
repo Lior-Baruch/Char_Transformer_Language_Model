@@ -40,7 +40,11 @@ def sample_replies(model, tokenizer, prompts, num_samples=1, max_new_tokens=64, 
     results = [None] * len(prompts)
     rows_per_call = max(1, max_batch // num_samples)
     for length, indices in by_length.items():
-        new_tokens = min(max_new_tokens, model.config.block_size - length)  # keep prompt + reply within the context
+        room = model.config.block_size - length  # keep prompt + reply within the context
+        if room <= 0:
+            raise ValueError(f"a prompt of {length} tokens leaves no room for a reply "
+                             f"within block_size {model.config.block_size}")
+        new_tokens = min(max_new_tokens, room)
         for start in range(0, len(indices), rows_per_call):
             chunk = indices[start:start + rows_per_call]
             x = torch.tensor([encoded[i] for i in chunk], dtype=torch.long, device=device)
