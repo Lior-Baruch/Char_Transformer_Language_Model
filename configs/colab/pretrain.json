@@ -1,0 +1,18 @@
+{
+  "data_path": "data/tinystories.txt",
+  "out_path": "checkpoints/colab/base.pt",
+  "model": {"block_size": 512, "n_embd": 640, "n_head": 10, "n_layer": 12, "dropout": 0.0},
+  "batch_size": 64,
+  "max_iters": 60000,
+  "eval_interval": 1000,
+  "eval_iters": 50,
+  "learning_rate": 6e-4,
+  "min_lr": 6e-5,
+  "warmup_iters": 1000,
+  "max_val_chars": 2000000,
+  "patience": 3,
+  "precision": "auto",
+  "resume": true,
+  "state_every": 5,
+  "sample_tokens": 1000
+}

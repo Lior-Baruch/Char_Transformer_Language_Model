@@ -21,9 +21,11 @@ from .config import to_dict
 from .data import load_text, pad_batch
 from .evaluation import evaluate_tasks
 from .model import token_logprobs
-from .tasks import VERIFIABLE_TASKS, TaskSuite, score
-from .training import (MetricsLogger, TrainConfig, clear_state, load_state, make_optimizer, metrics_path,
-                       optimizer_step, resolve_device, save_state, set_seed)
+from .tasks import VERIFIABLE_TASKS, TaskSuite, eval_tasks, score
+from .tokenizer import END_THINK, THINK
+from .training import (MetricsLogger, TrainConfig, backward, check_init_from, clear_state, load_state,
+                       make_optimizer, metrics_path, optimizer_step, resolve_device, save_state, set_seed,
+                       setup_precision, skip_if_finished)
 
 
 @dataclass
@@ -36,8 +38,11 @@ class GRPOConfig(TrainConfig):
     batch_size: int = 16  # prompts per step
     group_size: int = 8  # replies sampled per prompt
     temperature: float = 1.0  # sampling temperature for the replies
-    max_new_tokens: int = 32
+    max_new_tokens: int = 32  # reply length limit (reasoning replies need ~100; a cut-off reply gets reward 0)
     updates_per_batch: int = 1  # optimizer steps on each batch of samples (the ratio is 1 when this is 1)
+    # sequences per forward/backward pass in the update (0 = all batch_size x group_size at once); a smaller value
+    # needs less GPU memory and gives the same update, so it can be changed when resuming
+    micro_batch: int = 0
     clip_eps: float = 0.2
     kl_coef: float = 0.04
     max_iters: int = 300
@@ -46,7 +51,7 @@ class GRPOConfig(TrainConfig):
     warmup_iters: int = 10
     weight_decay: float = 0.0
     eval_interval: int = 25
-    eval_per_task: int = 50  # held-out examples per verifiable task for measuring accuracy (0 = skip)
+    eval_per_task: int = 50  # held-out examples per evaluated task for measuring accuracy (0 = skip)
     dropout: Optional[float] = 0.0  # dropout would make the probability ratios noisy
 
 
@@ -77,23 +82,28 @@ def grpo(cfg):
     """ trains cfg.init_from with GRPO, saves the final model, returns (model, tokenizer) """
     set_seed(cfg.seed)
     device = resolve_device(cfg.device)
+    done = skip_if_finished(cfg, device)
+    if done:
+        return done
+    check_init_from(cfg.init_from)
     model, tokenizer, _ = load_checkpoint(cfg.init_from, device, dropout=cfg.dropout)
     ref_model, ref_tokenizer, _ = load_checkpoint(cfg.ref_from or cfg.init_from, device, dropout=0.0)
     if ref_tokenizer.to_dict() != tokenizer.to_dict():
         raise ValueError("the reference model's tokenizer differs from the policy's, so their "
                          "log-probabilities can't be compared")
     ref_model.eval().requires_grad_(False)
+    scaler = setup_precision(cfg, device, model, ref_model)
     suite = TaskSuite(load_text(cfg.corpus_path))
-    eval_set = suite.eval_set(cfg.eval_per_task) if cfg.eval_per_task else []  # all tasks, not just trained ones
+    eval_set = suite.eval_set(cfg.eval_per_task, eval_tasks(cfg.tasks)) if cfg.eval_per_task else []
     print(f"device {device} | {cfg.batch_size} prompts x {cfg.group_size} replies per step | "
           f"{len(eval_set)} eval prompts")
 
     rng = random.Random(cfg.seed)
     optimizer = make_optimizer(model, cfg)
-    start_iter, state = (load_state(cfg.out_path, model, optimizer, device, to_dict(cfg), rng=rng)
+    start_iter, state = (load_state(cfg.out_path, model, optimizer, device, cfg, scaler, rng=rng)
                          if cfg.resume else (0, None))
-    logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None)
-    train_stats, metrics = [], {}
+    logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None, keep_until=start_iter)
+    train_stats, metrics = [], state.get('metrics', {}) if state is not None else {}
     for it in range(start_iter, cfg.max_iters + 1):
         if (it % cfg.eval_interval == 0 or it == cfg.max_iters) and not (state is not None and it == start_iter):
             metrics = {}
@@ -104,7 +114,8 @@ def grpo(cfg):
             if eval_set:
                 metrics.update(evaluate_tasks(model, tokenizer, eval_set, cfg.max_new_tokens))
             logger.log(it, **metrics)
-            save_state(cfg.out_path, model, optimizer, it, to_dict(cfg), rng=rng)
+            if (it // cfg.eval_interval) % cfg.state_every == 0:
+                save_state(cfg.out_path, model, optimizer, it, cfg, scaler, rng=rng, metrics=metrics)
         if it == cfg.max_iters:
             break
 
@@ -128,17 +139,32 @@ def grpo(cfg):
             old_logps = token_logprobs(model, x, y)
             ref_logps = token_logprobs(ref_model, x, y)
 
-        # 3. policy update
+        # 3. policy update, in parts of micro_batch sequences whose gradients add up to the whole batch's
+        n = len(sequences)
+        size = cfg.micro_batch or n
         for _ in range(cfg.updates_per_batch):
-            logps = token_logprobs(model, x, y)
-            loss, kl = grpo_loss(logps, old_logps, ref_logps, advantages, mask, cfg.clip_eps, cfg.kl_coef)
-            optimizer_step(model, optimizer, loss, it, cfg)
-        train_stats.append({'reward': rewards.mean().item(), 'kl': kl.item(), 'loss': loss.item(),
-                            'reply_len': mask.sum(dim=1).mean().item(),
-                            'groups_with_signal': (rewards.std(dim=1) > 0).float().mean().item()})
+            loss = kl = 0.0
+            for i in range(0, n, size):
+                part = slice(i, i + size)
+                logps = token_logprobs(model, x[part], y[part])
+                part_loss, part_kl = grpo_loss(logps, old_logps[part], ref_logps[part], advantages[part], mask[part],
+                                               cfg.clip_eps, cfg.kl_coef)
+                weight = len(logps) / n  # grpo_loss averages over sequences
+                backward(part_loss * weight, scaler)
+                loss, kl = loss + part_loss.item() * weight, kl + part_kl.item() * weight
+            optimizer_step(model, optimizer, None, it, cfg, scaler)
+        stats = {'reward': rewards.mean().item(), 'kl': kl, 'loss': loss,
+                 'reply_len': mask.sum(dim=1).mean().item(),
+                 'groups_with_signal': (rewards.std(dim=1) > 0).float().mean().item()}
+        if tokenizer.has_reasoning_tokens:
+            # the share of replies that reason and finish their reasoning (a cut-off one has no answer to score)
+            texts = [text for group in groups for _, text in group]
+            stats['reasoned'] = sum(THINK in t for t in texts) / len(texts)
+            stats['closed_think'] = sum(THINK in t and END_THINK in t.split(THINK, 1)[1] for t in texts) / len(texts)
+        train_stats.append(stats)
 
     save_checkpoint(cfg.out_path, model, tokenizer, {'stage': 'grpo', 'iter': cfg.max_iters, **metrics,
-                                                     'config': to_dict(cfg)})
+                                                     'config': to_dict(cfg), 'finished': True})
     clear_state(cfg.out_path)
     print(f"saved model to {cfg.out_path}")
     return model, tokenizer

@@ -1,0 +1,54 @@
+# Checks that `python -m charlm prepare-data` can still download and clean each dataset (the download addresses
+# are outside this repository and can change). It only runs when the data code changes, or by hand from the
+# Actions tab ("Run workflow"), since it downloads from Hugging Face and Project Gutenberg.
+name: data
+
+on:
+  pull_request:
+    paths: [charlm/datasets.py, charlm/data.py, .github/workflows/data.yml]
+  push:
+    branches: [master]
+    paths: [charlm/datasets.py, charlm/data.py, .github/workflows/data.yml]
+  workflow_dispatch:
+
+jobs:
+  prepare-data:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e .
+
+      - name: Download and clean each dataset
+        # TinyStories is ~2.2 GB, so only its first 5 million characters are read
+        run: |
+          python -m charlm prepare-data tinystories --out /tmp/data/tinystories.txt --max-chars 5000000
+          python -m charlm prepare-data shakespeare --out /tmp/data/shakespeare.txt
+          python -m charlm prepare-data tiny_shakespeare --out /tmp/data/tiny_shakespeare.txt
+
+      - name: Check the results
+        run: |
+          python - <<'PY'
+          import os
+          for name, min_chars in [('tinystories', 4_900_000), ('shakespeare', 5_000_000), ('tiny_shakespeare', 1_100_000)]:
+              text = open(f'/tmp/data/{name}.txt', encoding='ascii').read()  # fails on any non-ASCII character
+              assert len(text) >= min_chars, (name, len(text))
+              assert '<|endoftext|>' not in text and 'OF THE PROJECT GUTENBERG' not in text, name
+              print(f'{name}: {len(text):,} characters, starts with {text[:60]!r}')
+          PY
+          # tiny_shakespeare is the corpus the repository ships in data/input.txt
+          cmp <(head -c 1115393 /tmp/data/tiny_shakespeare.txt) data/input.txt
+
+      - name: Pretrain a tiny model on the downloaded files for a few steps
+        run: >
+          python -m charlm pretrain --set data_path=/tmp/data out_path=/tmp/base.pt max_iters=5 eval_interval=5
+          eval_iters=2 batch_size=8 model.n_layer=1 model.n_embd=32 model.n_head=2 model.block_size=64 sample_tokens=50

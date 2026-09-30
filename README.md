@@ -1,6 +1,7 @@
 # Character-Level Transformer Language Model
 
 [![tests](https://github.com/Lior-Baruch/Char_Transformer_Language_Model/actions/workflows/tests.yml/badge.svg)](https://github.com/Lior-Baruch/Char_Transformer_Language_Model/actions/workflows/tests.yml)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Lior-Baruch/Char_Transformer_Language_Model/blob/master/notebooks/colab_pipeline.ipynb)
 
 A small, readable PyTorch library for experimenting with the whole LLM training pipeline, one character at a time:
 
@@ -18,6 +19,8 @@ data/input.txt ───────────▶ base model ─────�
 4. **Reinforcement learning (GRPO).** The instruct model samples several answers per prompt and is rewarded for the correct ones.
 
 Every stage runs on a laptop CPU. The example models in `checkpoints/example/` were trained that way in about 70 minutes in total, and each stage measurably improves on the one before (see [Results](#results-of-the-example-models)).
+
+The models can also learn to **reason step by step**. Given `reasoning: true`, SFT teaches them to write a scratchpad between `<|think|>` and `<|/think|>` before answering a math question: addition, subtraction, multiplication, division and word problems such as "Adam has 12 apples to divide equally among 3 friends. How many each?" (see [Reasoning](#reasoning-step-by-step)). And for a bigger model, [a Colab notebook](#a-bigger-model-on-a-gpu-colab) pretrains a 59M-parameter model on a billion characters of [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) and fine-tunes it to reason.
 
 ## Install
 
@@ -39,6 +42,15 @@ python -m charlm generate --model checkpoints/example/base.pt --prompt "ROMEO:" 
 python -m charlm eval --model checkpoints/example/{sft,dpo,grpo}.pt --show 2
 ```
 
+The reasoning model shows its work before answering:
+
+```bash
+python -m charlm chat --model checkpoints/example/sft_reasoning.pt "What is 386 * 7?"
+# [thinking: 6*7=42+0=42 A=2, 8*7=56+4=60 A=02, 3*7=21+6=27 A=2702 => 2702] 2702
+python -m charlm chat --model checkpoints/example/sft_reasoning.pt "Adam has 12 apples to divide equally among 3 friends. How many each?"
+# [thinking: 12/3: 01/3=0 r1 A=0, 12/3=4 r0 A=04 => 4] 4
+```
+
 Train the whole pipeline yourself (each stage reads the previous stage's checkpoint):
 
 ```bash
@@ -55,7 +67,38 @@ python -m charlm grpo --config configs/example/grpo.json --set kl_coef=0 group_s
 python -m charlm pretrain --config configs/example/pretrain.json --set model.n_layer=6 --print-config
 ```
 
-Each run writes a checkpoint (`out_path`) and its metrics as JSON lines next to it (`*.metrics.jsonl`), ready for plotting and comparing runs. Every stage also saves its full training state at each evaluation (`*.state.pt`, deleted when the run finishes). If a run is interrupted, run the same command with `--set resume=true`. On a CPU it continues exactly where it left off, bit for bit. On a GPU the random-number state is restored too, but some GPU operations aren't deterministic, so the numbers can differ slightly. `configs/pretrain_gpu.json` is the original 10.8M-parameter model, for use on a GPU.
+Each run writes a checkpoint (`out_path`) and its metrics as JSON lines next to it (`*.metrics.jsonl`), ready for plotting and comparing runs. Every stage also saves its full training state at each evaluation (`*.state.pt`, deleted when the run finishes; `state_every=N` saves it every N evaluations instead, for big models). If a run is interrupted, run the same command with `--set resume=true`. On a CPU it continues exactly where it left off, bit for bit. On a GPU the random-number state is restored too, but some GPU operations aren't deterministic, so the numbers can differ slightly. With `resume=true`, a stage that already finished with the same settings is skipped, so a whole pipeline can simply be rerun after a crash. If the settings changed, resuming stops with an error instead of mixing two different runs (or keeping a finished model trained with other settings): delete the old checkpoint, or set `resume=false`, to train again.
+
+Training uses the GPU automatically when there is one (`device` defaults to `auto`). `precision` sets the number format: `fp32` (the default), `bf16`, `fp16`, or `auto`, which picks bf16 on GPUs that support it natively (A100, L4, RTX 30xx and newer), fp16 with loss scaling on older ones (T4, V100) and fp32 on a CPU. 16-bit training is several times faster on a GPU. `configs/pretrain_gpu.json` is the original 10.8M-parameter model, for use on a GPU.
+
+## A bigger model on a GPU (Colab)
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Lior-Baruch/Char_Transformer_Language_Model/blob/master/notebooks/colab_pipeline.ipynb)
+
+`notebooks/colab_pipeline.ipynb` runs the pipeline on a Colab GPU with the configs in `configs/colab/`:
+
+| stage | what it does | rough time on an A100 |
+|---|---|---|
+| data | download TinyStories and keep the first billion characters | ~5 min |
+| pretrain | 59M parameters (12 layers, 640-dim, 10 heads, 512-character context), 60,000 steps of 64 x 512 characters | ~2 h |
+| SFT | all nine checkable tasks, with reasoning | ~20 min |
+| GRPO | the five math tasks, 32 prompts x 16 replies per step | ~30 min |
+
+The times are estimates: this repository's own runs are on a CPU. An L4 is roughly three times slower, so the notebook has a `MAX_ITERS` setting to shorten pretraining. Training runs in bf16 (`"precision": "auto"`). Data and checkpoints are kept on Google Drive. If Colab disconnects, run all the cells again: finished stages are skipped and the interrupted one resumes from its last saved state.
+
+### More training data
+
+`prepare-data` downloads a corpus and cleans it to the tokenizer's characters (printable ASCII and newline: curly quotes become straight ones, accents are dropped, and so on):
+
+```bash
+python -m charlm prepare-data tinystories                      # ~2.7M short stories, ~2.2 GB -> data/tinystories.txt
+python -m charlm prepare-data tinystories --max-chars 50000000  # just the first 50M characters
+python -m charlm prepare-data shakespeare                      # the complete works, 5x data/input.txt -> data/shakespeare.txt
+python -m charlm prepare-data files --files my_texts/*.txt --out data/mine.txt   # your own text files
+python -m charlm pretrain --config configs/example/pretrain.json --set data_path=data/shakespeare.txt
+```
+
+The data is streamed, so it is never held in memory whole. A `.json` file next to the output records what was prepared, so running the same command again skips the download. The SFT tasks still take their words from `corpus_path` (`data/input.txt` by default), whatever the base model was pretrained on.
 
 ## Results of the example models
 
@@ -202,6 +245,75 @@ The "Say a line as …" task has no single right answer, so DPO and GRPO don't t
 
 They sound Shakespearean, if not very meaningful. GRPO gives the same line for two different speakers.
 
+## Reasoning step by step
+
+Does writing out the steps help a 1.8M-parameter model do arithmetic? To find out, two SFT runs start from the same `base.pt`, with the same 100,000 examples of nine tasks (`reverse`, `uppercase`, `spell`, `length` and the math tasks `add`, `sub`, `mul`, `div`, `word`), the same 5,000 steps and the same batch size. The only difference is the replies to the math tasks: the plain model answers directly, the reasoning model first writes the [scratchpad](#reasoning-tokens). Both then get 300 steps of GRPO on the five math tasks (16 prompts x 8 replies). Accuracy on 500 held-out prompts per task:
+
+```bash
+python -m charlm sft --config configs/reasoning/sft_reasoning.json   # ~65 min on 2 CPU cores
+python -m charlm sft --config configs/reasoning/sft_plain.json       # ~35 min (not in the repository, only its metrics)
+python -m charlm grpo --config configs/reasoning/grpo_reasoning.json
+python -m charlm eval --model checkpoints/example/sft_reasoning.pt --tasks add sub mul div word --n-per-task 500 --show 5
+```
+
+| model | reverse | uppercase | spell | length | add | sub | mul | div | word | overall |
+|---|---|---|---|---|---|---|---|---|---|---|
+| SFT | 99.2% | 100% | 100% | 100% | 8.0% | 4.4% | 30.6% | 20.6% | 4.4% | 51.9% |
+| SFT + GRPO | 98.8% | 100% | 99.8% | 100% | 10.4% | 5.6% | 31.0% | 24.4% | 3.4% | 52.6% |
+| SFT + reasoning (`sft_reasoning.pt`) | 99.2% | 99.4% | 99.4% | 100% | **99.6%** | **100%** | **100%** | 99.0% | 21.6% | 90.9% |
+| SFT + reasoning + GRPO (`grpo_reasoning.pt`) | 99.0% | 99.4% | 99.4% | 100% | **99.6%** | **100%** | **100%** | **99.4%** | **33.8%** | **92.3%** |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_final_dark.png">
+  <img alt="Grouped bar chart of held-out accuracy of four models on add, sub, mul, div, word and all nine tasks. The plain SFT model scores 4% to 31% on the arithmetic tasks, and GRPO barely changes that. Both reasoning models score 99% to 100%. On word problems the plain models score under 5%, the reasoning model 22% and 34% after GRPO. Overall: 52%, 53%, 91% and 92%." src="docs/figures/reasoning_final.png">
+</picture>
+
+**The scratchpad solves the arithmetic.** Without it, SFT gets 8% of held-out additions right, 4% of subtractions, 31% of multiplications and 21% of divisions. With it, 99-100% on all four, with 3-digit numbers. The model, the prompts and the number of steps are the same. Without a scratchpad, the model must produce the first digit of `386 * 7 = 2702` before it has worked out the carries that decide it. With one, each step needs only a few symbols written just before it: `8*7=56+4=60` needs the digit, the multiplier and the carry from the step before. The model also follows the method exactly: on add, sub, mul and div, 99-100% of its scratchpads are the taught trace, character for character.
+
+The price is length: a reasoning reply to a math question is ~55 tokens instead of ~4, so the reasoning SFT run took almost twice as long on the same hardware (63 minutes instead of 36).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_sft_dark.png">
+  <img alt="Five small line charts of held-out accuracy during SFT on add, sub, mul, div and word, for the plain and the reasoning model. The reasoning model reaches 100% on mul by step 2,000, on add and sub by step 3,250 and on div by step 4,250. The plain model stays at or below 28%. On word problems the reasoning model stays between 16% and 28% after step 1,000, and the plain one under 6%." src="docs/figures/reasoning_sft.png">
+</picture>
+
+**Word problems are about language, not arithmetic.** The reasoning model gets 22% of the held-out word problems. They are asked in a fourth phrasing it never saw. The same problems asked in one of its three training phrasings get 98%:
+
+| model | phrasing | accuracy | reads the story right (right equation) | + | - | * | / |
+|---|---|---|---|---|---|---|---|
+| SFT + reasoning | never trained on | 22% | 28% | 25% | 2% | 1% | 60% |
+| SFT + reasoning | trained on | 98% | 100% | 100% | 100% | 100% | 92% |
+| SFT + reasoning + GRPO | never trained on | 34% | 33% | 45% | 1% | 22% | 71% |
+| SFT + reasoning + GRPO | trained on | 97% | 100% | 100% | 100% | 100% | 89% |
+
+With the new phrasing, the model writes the wrong equation first. It reads "There are 7 marbles and 8 more arrive" as `87+8`, and "Adam puts 20 stickers into 5 equal groups" as `20+5`. Three phrasings per operation are not enough for a character-level model to learn what the words mean. More phrasings, or a bigger model pretrained on more English (like the [Colab model](#a-bigger-model-on-a-gpu-colab)), are the natural next experiments.
+
+**GRPO has little left to teach, but it helps with the new phrasing.** The reasoning model already gets 99% of its sampled training replies right, so only ~5% of the groups contain both a right and a wrong reply, and only those carry a learning signal. The arithmetic stays at 99-100%. Still, held-out word problems rise from 22% to 34%, although GRPO trains only on the three training phrasings. The gain comes from reading the new phrasing better: multiplication stories go from 1% to 22%, addition stories from 25% to 45%. The plain model's GRPO run goes nowhere: its reward stays near 20%, and no task's held-out accuracy moves by more than 4 points. GRPO took 5 minutes for the plain model and 13 for the reasoning one.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_grpo_dark.png">
+  <img alt="Two line charts over 300 GRPO steps. Reward: the reasoning model gets 98-99% of its sampled replies right throughout, the plain model 16-22%. Held-out word problems in the new phrasing: the reasoning model rises from 18% to 28% (50 prompts), the plain model stays at 0-4%." src="docs/figures/reasoning_grpo.png">
+</picture>
+
+Replies of the two SFT models to the first held-out prompts of each math task (greedy):
+
+| prompt | expected | SFT | SFT + reasoning |
+|---|---|---|---|
+| What is 65 + 11? | `76` | `78` ✗ | `<\|think\|>5+1+0=06 A=6, 6+1+0=07 A=076 => 76<\|/think\|>76` ✓ |
+| What is 83 + 41? | `124` | `127` ✗ | `<\|think\|>3+1+0=04 A=4, 8+4+0=12 A=124 => 124<\|/think\|>124` ✓ |
+| What is 324 - 172? | `152` | `177` ✗ | `<\|think\|>4-2-0=2 b0 A=2, 2-7-0=5 b1 A=52, 3-1-1=1 b0 A=152 => 152<\|/think\|>152` ✓ |
+| What is 585 - 559? | `26` | `10` ✗ | `<\|think\|>5-9-0=6 b1 A=6, 8-5-1=2 b0 A=26, 5-5-0=0 b0 A=026 => 26<\|/think\|>26` ✓ |
+| What is 370 * 2? | `740` | `740` ✓ | `<\|think\|>0*2=00+0=00 A=0, 7*2=14+0=14 A=40, 3*2=06+1=07 A=0740 => 740<\|/think\|>740` ✓ |
+| What is 139 * 7? | `973` | `973` ✓ | `<\|think\|>9*7=63+0=63 A=3, 3*7=21+6=27 A=73, 1*7=07+2=09 A=0973 => 973<\|/think\|>973` ✓ |
+| What is 468 / 6? | `78` | `81` ✗ | `<\|think\|>04/6=0 r4 A=0, 46/6=7 r4 A=07, 48/6=8 r0 A=078 => 78<\|/think\|>78` ✓ |
+| What is 3520 / 8? | `440` | `480` ✗ | `<\|think\|>03/8=0 r3 A=0, 35/8=4 r3 A=04, 32/8=4 r0 A=044, 00/8=0 r0 A=0440 => 440<\|/think\|>440` ✓ |
+| Omer puts 12 marbles into 4 equal groups. How many per group? | `3` | `5` ✗ | `<\|think\|>12/4: 01/4=0 r1 A=0, 12/4=3 r0 A=03 => 3<\|/think\|>3` ✓ |
+| Lily packs 5 cards into each of 3 boxes. How many cards? | `15` | `25` ✗ | `<\|think\|>55/3: 05/3=1 r0 A=1, 05/3=1 r0 A=11 => 11<\|/think\|>11` ✗ |
+
+The last one shows the word-problem failure: in the unfamiliar phrasing, the model reads "5 cards into each of 3 boxes" as a division, `55/3`.
+
+The plain models are not in the repository, only their metrics (`checkpoints/example/experiments/`); `docs/make_reasoning_figures.py` makes the figures and tables from them.
+
 ## Using it as a library
 
 ```python
@@ -223,7 +335,7 @@ The building blocks are exposed too: `CharTransformerLanguageModel` and `ModelCo
 
 ### Tokenizer and chat template
 
-Each character is one token. The vocabulary is every printable ASCII character and newline, so digits and symbols that never appear in Shakespeare can still be used later. It also has four special tokens. A conversation turn looks like this:
+Each character is one token. The vocabulary is every printable ASCII character and newline, so digits and symbols that never appear in Shakespeare can still be used later. It also has four special tokens (six with the [reasoning tokens](#reasoning-tokens)). A conversation turn looks like this:
 
 ```
 <|user|>Reverse the word: love<|assistant|>evol<|end|>
@@ -236,12 +348,13 @@ A decoder-only transformer (`charlm/model.py`):
 - Pre-norm transformer blocks, each with causal multi-head self-attention and a feed-forward network (ReLU, 4x wide).
 - A final LayerNorm and a linear layer that outputs the next-token scores.
 
-Attention is scaled by 1/sqrt(head_size).
+Attention is scaled by 1/sqrt(head_size). When generating, a KV cache keeps each layer's keys and values, so each new token costs one position instead of the whole context.
 
 ### 1. Pretraining (`charlm/pretrain.py`)
 
 - Random 128-character windows of the text are used as training inputs, and the target at every position is the next character.
 - The last 10% of the text is held out as validation data.
+- `data_path` can be a file, a directory of `.txt` files, a pattern like `"data/*.txt"`, or a list of these. With several files, the end of each file is held out. `max_val_chars` caps that part (the Colab config holds out 2M characters rather than 10% of a billion). ASCII text is stored as one byte per character, so a 1 GB corpus fits in 1 GB of memory.
 - The learning rate follows a linear warmup, then a cosine decay.
 - The checkpoint with the lowest validation loss is kept, and training stops early once the validation loss stops improving.
 
@@ -253,7 +366,7 @@ Attention is scaled by 1/sqrt(head_size).
 
 ### Tasks (`charlm/tasks.py`)
 
-The instruction data is generated from the corpus. Five tasks have one correct answer, so a reply can be checked automatically:
+The instruction data is generated from the corpus. Every task except `speak` has one correct answer, so a reply can be checked automatically:
 
 | task | example prompt | answer |
 |---|---|---|
@@ -262,11 +375,37 @@ The instruction data is generated from the corpus. Five tasks have one correct a
 | spell | `Spell out: love` | `l-o-v-e` |
 | length | `How many letters are in "love"?` | `4` |
 | add | `What is 38 + 45?` | `83` |
+| sub | `What is 704 - 358?` | `346` |
+| mul | `What is 386 * 7?` | `2702` |
+| div | `What is 912 / 8?` | `114` |
+| word | `Adam has 12 apples to divide equally among 3 friends. How many each?` | `4` |
 | speak | `Say a line as ROMEO.` | a line ROMEO speaks in the play (SFT only, not checkable) |
 
 Because the answers can be checked, the same tasks give labeled data for SFT, correct/wrong pairs for DPO and a reward for GRPO.
 
-Words are 3 to 12 letters long, and numbers go up to 99. 20% of the words, number pairs and speeches are held out. All accuracy numbers are measured on those held-out prompts, so they show whether the model learned the task rather than memorized the training examples.
+The first five tasks are the defaults. `sub`, `mul`, `div` and `word` are used when a config lists them in `tasks`. Words are 3 to 12 letters long and `add` uses numbers up to 99. `sub` uses numbers up to 999 (never below zero), `mul` multiplies a number up to 999 by one digit, and `div` divides by one digit with no remainder. Word problems use one operation on small numbers, in four phrasings per operation.
+
+20% of the words, number problems and speeches are held out, and so is one phrasing of each word problem. All accuracy numbers are measured on those held-out prompts, so they show whether the model learned the task rather than memorized the training examples (or, for word problems, the phrasing).
+
+### Reasoning tokens
+
+With `reasoning: true`, SFT adds two special tokens, `<|think|>` and `<|/think|>`, and the replies to the math tasks show their work before the answer. The scratchpads work digit by digit, like arithmetic on paper, so each step is small enough for a tiny model to learn:
+
+```
+What is 47 + 85?   <|think|>7+5+0=12 A=2, 4+8+1=13 A=132 => 132<|/think|>132
+What is 82 - 47?   <|think|>2-7-0=5 b1 A=5, 8-4-1=3 b0 A=35 => 35<|/think|>35
+What is 47 * 6?    <|think|>7*6=42+0=42 A=2, 4*6=24+4=28 A=282 => 282<|/think|>282
+What is 84 / 6?    <|think|>08/6=1 r2 A=1, 24/6=4 r0 A=14 => 14<|/think|>14
+Maya has 12 cookies to divide equally among 3 friends. How many each?
+                   <|think|>12/3: 01/3=0 r1 A=0, 12/3=4 r0 A=04 => 4<|/think|>4
+```
+
+- Addition and multiplication go from the rightmost digit, writing the carry (`+1`). Subtraction writes the borrow (`b1`). Division goes from the left, writing the remainder (`r2`).
+- `A=` is the answer so far. The trace ends with `=> answer`, which the model then copies after `<|/think|>`.
+- Word problems first write the equation (`12/3:`), so the model has to work out which operation the story needs.
+- Only the final answer is scored. The evaluation also reports `trace/<task>`, the share of replies whose reasoning matches the taught method exactly.
+
+The tokens are appended after the existing ones, so a model without them (like `base.pt`) keeps every token id. The model's embedding grows by two rows (`model.resize_vocab`). DPO builds its chosen replies with the reasoning when the model has these tokens, and GRPO logs `closed_think`, the share of sampled replies that finish their reasoning within `max_new_tokens`. A reply that is cut off has no answer and gets reward 0.
 
 ### 3a. DPO (`charlm/dpo.py`)
 
@@ -297,7 +436,8 @@ loss = -min(ratio * A, clip(ratio, 1 - eps, 1 + eps) * A) + kl_coef * KL(π || �
 
 ## Experiment ideas
 
-- **Base model.** Scale the model or the context (`model.*`) and watch how the val loss and samples change. Or pretrain on your own text with `data_path`.
+- **Base model.** Scale the model or the context (`model.*`) and watch how the val loss and samples change. Or pretrain on more text (`prepare-data`) or your own (`data_path`).
+- **Reasoning.** Change the scratchpad format in `reasoning.py` (e.g. drop the running answer `A=`, or the carries) and see which parts the model needs. Or train on 2-digit numbers and test on 3-digit ones.
 - **SFT.** Train on less data (`n_train`), train on a subset of `tasks` and test on the others, or skip pretraining and see how much the base model helps.
 - **DPO.** Sweep `beta` and `nll_coef`. Or build the pairs from a different model than the one being trained (`data_path`).
 - **GRPO.** Sweep `kl_coef` (try 0), `group_size` and `temperature`, or set `updates_per_batch` > 1 so the clipping matters. Or give addition partial credit per correct digit, or add a task in `tasks.py` with its own reward.
@@ -307,24 +447,33 @@ loss = -min(ratio * A, clip(ratio, 1 - eps, 1 + eps) * A) + kl_coef * KL(π || �
 
 ```
 charlm/
-  tokenizer.py    character tokenizer with chat special tokens
-  model.py        the transformer, sampling, per-token log-probabilities
+  tokenizer.py    character tokenizer with chat (and reasoning) special tokens
+  model.py        the transformer, sampling with a KV cache, per-token log-probabilities
   checkpoint.py   save/load a model together with its config and tokenizer
   config.py       dataclass configs from JSON files + key=value overrides
-  training.py     shared training utilities (optimizer, LR schedule, metrics logging)
+  training.py     shared training utilities (optimizer, LR schedule, precision, resuming, metrics logging)
+  data.py         text files and batches
+  datasets.py     downloading and cleaning larger corpora (`prepare-data`)
   chat.py         chat template, loss masking, batched reply sampling
   tasks.py        synthetic instruction tasks with held-out splits and a reward
+  reasoning.py    the <|think|> reply format and the step-by-step arithmetic traces
   evaluation.py   task accuracy
   pretrain.py     stage 1
   sft.py          stage 2
   dpo.py          stage 3a
   grpo.py         stage 3b
   cli.py          `python -m charlm ...`
-configs/          example configs for each stage
+configs/
+  example/        the example models (CPU)
+  reasoning/      SFT and GRPO with and without reasoning (CPU)
+  colab/          the 59M-parameter pipeline (GPU)
+notebooks/colab_pipeline.ipynb   the GPU pipeline on Colab
 .github/workflows/tests.yml   CI: lint and tests on pull requests and pushes to master
+.github/workflows/data.yml    CI: checks that the dataset downloads still work (when the data code changes)
 checkpoints/example/   trained example models, their metrics and the DPO pairs
-  experiments/  metrics of the DPO and GRPO variants that didn't work
-docs/             README figures and the scripts that make them (make_figures.py, make_examples.py)
+  experiments/  metrics of the variants and comparison runs
+docs/             README figures and the scripts that make them (make_figures.py, make_examples.py,
+                  make_reasoning_figures.py)
 data/input.txt    Tiny Shakespeare (1.1M characters)
 tests/            pytest suite, including a tiny end-to-end run of the pipeline
 char_transformer_language_model.ipynb   the original self-contained notebook walkthrough

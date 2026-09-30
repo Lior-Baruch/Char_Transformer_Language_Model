@@ -1,0 +1,21 @@
+{
+  "init_from": "checkpoints/colab/base.pt",
+  "out_path": "checkpoints/colab/sft.pt",
+  "corpus_path": "data/input.txt",
+  "tasks": ["reverse", "uppercase", "spell", "length", "add", "sub", "mul", "div", "word"],
+  "reasoning": true,
+  "n_train": 200000,
+  "n_val": 2000,
+  "batch_size": 64,
+  "max_iters": 8000,
+  "eval_interval": 500,
+  "learning_rate": 3e-4,
+  "min_lr": 3e-5,
+  "warmup_iters": 200,
+  "eval_per_task": 100,
+  "max_new_tokens": 128,
+  "patience": 3,
+  "precision": "auto",
+  "resume": true,
+  "state_every": 4
+}
