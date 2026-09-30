@@ -14,6 +14,7 @@ from charlm import TaskSuite, load_checkpoint, sample_replies, score  # noqa: E4
 
 EXAMPLE = os.path.join(ROOT, 'checkpoints', 'example')
 MODELS = ['sft', 'dpo', 'grpo']
+EVAL_PER_TASK = 500  # the evaluation set behind the README table; its prompts depend on this size
 PER_TASK = {'reverse': 2, 'uppercase': 1, 'spell': 2, 'length': 1, 'add': 5}  # the first prompts of each task
 SPEAKERS = ['ROMEO', 'JULIET', 'KING RICHARD III', 'Nurse']
 
@@ -24,7 +25,7 @@ def cell(text):
 
 def main():
     suite = TaskSuite(open(os.path.join(ROOT, 'data', 'input.txt')).read())
-    eval_set = suite.eval_set(max(PER_TASK.values()))
+    eval_set = suite.eval_set(EVAL_PER_TASK)
     examples = [e for task, n in PER_TASK.items() for e in [x for x in eval_set if x.task == task][:n]]
     models = {name: load_checkpoint(os.path.join(EXAMPLE, f'{name}.pt'))[:2] for name in MODELS}
 

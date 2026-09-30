@@ -138,8 +138,8 @@ def pretraining_loss(t):
 def sft_accuracy(t):
     rows = read_metrics('sft.metrics.jsonl')
     fig, axes = new_figure(t, 'SFT: held-out accuracy per task during training',
-                           'Measured on 50 held-out prompts per task. The word tasks are learned within ~1,000 '
-                           'steps; addition stays low.', ncols=5, height=3.0, top=0.7, wspace=0.35)
+                           'Measured on 50 held-out prompts per task. The word tasks reach 98-100% by step 2,000; '
+                           'addition stays low.', ncols=5, height=3.0, top=0.7, wspace=0.35)
     fig.subplots_adjust(right=0.97)
     for ax, task in zip(axes, TASKS):
         x, acc = column(rows, f'acc/{task}', 100)
