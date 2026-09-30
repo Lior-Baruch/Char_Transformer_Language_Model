@@ -1,16 +1,22 @@
+import json
 import math
 import os
 
 import pytest
 import torch
 
-from charlm import (CharTokenizer, CharTransformerLanguageModel, DPOConfig, GRPOConfig, ModelConfig, PretrainConfig,
-                    SFTConfig, TaskSuite, dpo, encode_chat_example, grpo, load_checkpoint, load_config, pretrain,
-                    sample_replies, save_checkpoint, score, sft)
+from charlm import (MATH_TASKS, REASONING_TOKENS, VERIFIABLE_TASKS, CharTokenizer, CharTransformerLanguageModel,
+                    DPOConfig, GRPOConfig, ModelConfig, PretrainConfig, SFTConfig, TaskSuite, answer_of, dpo,
+                    encode_chat_example, format_response, grpo, load_checkpoint, load_config, pretrain,
+                    sample_replies, save_checkpoint, score, sft, split_reply)
 from charlm.cli import main as cli_main
+from charlm.data import read_jsonl
 from charlm.dpo import dpo_loss
 from charlm.grpo import group_advantages, grpo_loss
 from charlm.model import CausalSelfAttention
+from charlm.reasoning import add_trace, div_trace, mul_trace, sub_trace
+from charlm.tasks import eval_tasks
+from charlm.tokenizer import END_THINK, THINK
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORPUS = os.path.join(ROOT, 'data', 'input.txt')
@@ -161,10 +167,10 @@ def test_resumed_run_matches_uninterrupted_run(stage, tmp_path, monkeypatch):
 
     real_step = module.optimizer_step
 
-    def crash_at_step_5(model, optimizer, loss, it, cfg):
+    def crash_at_step_5(model, optimizer, loss, it, *args, **kwargs):
         if it == 5:
             raise KeyboardInterrupt
-        return real_step(model, optimizer, loss, it, cfg)
+        return real_step(model, optimizer, loss, it, *args, **kwargs)
 
     monkeypatch.setattr(module, 'optimizer_step', crash_at_step_5)
     with pytest.raises(KeyboardInterrupt):
@@ -256,3 +262,221 @@ def test_full_pipeline(tmp_path):
     assert (tmp_path / 'dpo.pairs.jsonl').exists()
     cli_main(['eval', '--model', sft_path, str(tmp_path / 'grpo.pt'), '--corpus', str(corpus), '--n-per-task', '2'])
     cli_main(['chat', '--model', sft_path, 'Reverse the word: love'])
+
+
+# --- reasoning, new tasks, precision, data ---------------------------------------------------------------------
+
+def test_reasoning_tokens_are_appended_without_changing_ids():
+    tok = CharTokenizer()
+    assert 'chars' in tok.to_dict() and not tok.has_reasoning_tokens  # the original checkpoint format
+    before = dict(tok.stoi)
+    assert tok.add_special_tokens(REASONING_TOKENS) == 2 and tok.add_special_tokens(REASONING_TOKENS) == 0
+    assert all(tok.stoi[t] == i for t, i in before.items()) and tok.vocab_size == len(before) + 2
+    restored = CharTokenizer.from_dict(tok.to_dict())
+    assert restored.itos == tok.itos and restored.has_reasoning_tokens
+    reply = format_response('132', '7+5+0=12 A=2')
+    ids = tok.encode(reply, allow_special=REASONING_TOKENS)
+    assert ids[0] == tok.stoi[THINK] and tok.stoi[END_THINK] in ids and tok.decode(ids) == reply
+    assert tok.decode(ids, skip_special=True) == '7+5+0=12 A=2132'
+    # a user's message is never turned into special tokens
+    assert len(tok.encode(THINK, allow_special=False)) == len(THINK)
+    with pytest.raises(ValueError, match='reasoning tokens'):
+        encode_chat_example(CharTokenizer(), 'What is 1 + 2?', format_response('3', 'x'))
+
+
+def test_resize_vocab_keeps_the_old_predictions():
+    model = tiny_model().eval()
+    x = torch.randint(0, 100, (2, 10))
+    before = model(x)[0]
+    model.resize_vocab(102)
+    after = model(x)[0]
+    assert after.shape[-1] == 102 and torch.allclose(before, after[..., :100], atol=1e-6)
+    assert model.config.vocab_size == 102 and model(torch.tensor([[101, 100]]))[0].shape == (1, 2, 102)
+
+
+def test_kv_cache_generates_the_same_tokens():
+    model = tiny_model(block_size=32)
+    x = torch.randint(0, 100, (3, 5))
+    cached = model.generate(x, 20, temperature=0.0)
+    assert torch.equal(cached, model.generate(x, 20, temperature=0.0, use_cache=False))
+    torch.manual_seed(3)
+    sampled = model.generate(x, 20, temperature=1.0)
+    torch.manual_seed(3)
+    assert torch.equal(sampled, model.generate(x, 20, temperature=1.0, use_cache=False))
+    assert model.generate(x, 40, temperature=0.0).shape == (3, 45)  # longer than block_size: a sliding window
+
+
+def test_reasoning_traces_are_correct():
+    import random
+    rng = random.Random(0)
+    for _ in range(300):
+        a, b = rng.randint(0, 9999), rng.randint(0, 9999)
+        trace, answer = add_trace(a, b)
+        assert answer == str(a + b) and trace.endswith(f'=> {a + b}')
+        a, b = max(a, b), min(a, b)
+        assert sub_trace(a, b)[1] == str(a - b)
+        d = rng.randint(1, 9)
+        assert mul_trace(a, d)[1] == str(a * d)
+        assert div_trace(a * d, d)[1] == str(a)
+    assert add_trace(47, 85)[0] == '7+5+0=12 A=2, 4+8+1=13 A=132 => 132'
+    assert sub_trace(82, 47)[0] == '2-7-0=5 b1 A=5, 8-4-1=3 b0 A=35 => 35'
+    assert mul_trace(47, 6)[0] == '7*6=42+0=42 A=2, 4*6=24+4=28 A=282 => 282'
+    assert div_trace(84, 6)[0] == '08/6=1 r2 A=1, 24/6=4 r0 A=14 => 14'
+    assert split_reply(format_response('5', 'x')) == ('x', '5') and split_reply('<|think|>cut') == ('cut', '')
+    assert split_reply('plain') == ('', 'plain') and answer_of('<|think|>x<|/think|> 7') == ' 7'
+
+
+def test_new_tasks_are_correct_split_and_fit_the_example_context():
+    suite = TaskSuite(open(CORPUS).read())
+    tok = CharTokenizer()
+    tok.add_special_tokens(REASONING_TOKENS)
+    ops = {'sub': lambda a, b: a - b, 'mul': lambda a, b: a * b, 'div': lambda a, b: a // b}
+    for split in ('train', 'eval'):
+        examples = suite.sample(2000, MATH_TASKS, split, seed=5)
+        for e in examples:
+            if e.task in ops:
+                a, b = map(int, e.prompt[len('What is '):-1].split(f" {dict(sub='-', mul='*', div='/')[e.task]} "))
+                assert int(e.answer) == ops[e.task](a, b) and (e.task != 'div' or a % b == 0)
+            assert e.reasoning.endswith(f'=> {e.answer}') and score(e, format_response(e.answer, e.reasoning))
+            inputs, _ = encode_chat_example(tok, e.prompt, format_response(e.answer, e.reasoning))
+            assert len(inputs) + 1 <= 128, e  # the example models have block_size 128
+    train = {e.prompt for e in suite.sample(3000, ['sub', 'mul', 'div'], 'train', seed=1)}
+    held_out = {e.prompt for e in suite.eval_set(300, ['sub', 'mul', 'div'])}
+    assert not train & held_out
+    # word problems are evaluated on a phrasing that is never trained on
+    import re
+    from charlm.tasks import WORD_TEMPLATES
+    pattern = lambda t: re.compile(re.sub(r'\\{[a-z]\\}', '.+', re.escape(t)) + '$')
+    held_out = [pattern(ts[-1]) for ts in WORD_TEMPLATES.values()]
+    trained = [pattern(t) for ts in WORD_TEMPLATES.values() for t in ts[:-1]]
+    assert all(any(p.match(e.prompt) for p in held_out) for e in suite.eval_set(100, ['word']))
+    assert not any(p.match(e.prompt) for p in held_out for e in suite.sample(300, ['word']))
+    assert all(any(p.match(e.prompt) for p in trained) for e in suite.sample(300, ['word']))
+    assert eval_tasks(['reverse', 'sub', 'word']) == VERIFIABLE_TASKS + ('sub', 'word')
+
+
+def test_precision_options_on_cpu(tmp_path):
+    from charlm.training import resolve_precision, setup_precision
+    assert resolve_precision('auto', 'cpu') == 'fp32'
+    with pytest.raises(ValueError):
+        resolve_precision('fp8', 'cpu')
+    model = tiny_model()
+    cfg = SFTConfig(precision='bf16')
+    scaler = setup_precision(cfg, 'cpu', model)
+    assert not scaler.is_enabled()
+    logits, loss = model(torch.randint(0, 100, (2, 8)), torch.randint(0, 100, (2, 8)))
+    assert logits.dtype == torch.bfloat16 and loss.dtype == torch.float32
+    corpus = tmp_path / 'corpus.txt'
+    corpus.write_text(open(CORPUS).read()[:100_000])
+    for precision in ('bf16', 'fp16'):
+        model, _ = pretrain(load_config(PretrainConfig, None, [
+            f'data_path={corpus}', f'out_path={tmp_path / precision}.pt', 'model.n_embd=16', 'model.n_head=2',
+            'model.n_layer=1', 'model.block_size=32', 'batch_size=4', 'max_iters=3', 'eval_interval=3',
+            'eval_iters=1', 'sample_tokens=0', 'device=cpu', f'precision={precision}']))
+        assert all(torch.isfinite(p).all() for p in model.parameters())
+
+
+def test_sft_with_reasoning_then_dpo_and_grpo(tmp_path):
+    corpus = tmp_path / 'corpus.txt'
+    corpus.write_text(open(CORPUS).read()[:200_000])
+    base, sft_path = str(tmp_path / 'base.pt'), str(tmp_path / 'sft.pt')
+    pretrain(load_config(PretrainConfig, None, [
+        f'data_path={corpus}', f'out_path={base}', 'model.n_embd=32', 'model.n_head=2', 'model.n_layer=1',
+        'model.block_size=128', 'batch_size=4', 'max_iters=2', 'eval_iters=1', 'device=cpu', 'sample_tokens=0']))
+    common = [f'corpus_path={corpus}', 'device=cpu', 'eval_per_task=2', 'max_new_tokens=100']
+    model, tok = sft(load_config(SFTConfig, None, common + [
+        f'init_from={base}', f'out_path={sft_path}', 'n_train=32', 'n_val=8', 'batch_size=4', 'max_iters=2',
+        'eval_interval=1', 'reasoning=true', 'tasks=["reverse","sub","word"]']))
+    assert tok.has_reasoning_tokens and model.config.vocab_size == tok.vocab_size == 102
+    metrics = [json.loads(line) for line in open(tmp_path / 'sft.metrics.jsonl')]
+    assert {'acc/sub', 'acc/word', 'acc/add'} <= set(metrics[-1])  # the original tasks are always evaluated
+    assert load_checkpoint(sft_path)[2]['finished']
+    dpo(load_config(DPOConfig, None, common + [
+        f'init_from={sft_path}', f'out_path={tmp_path / "dpo.pt"}', 'n_pairs=6', 'batch_size=2', 'max_iters=1',
+        'tasks=["sub"]']))
+    assert all(THINK in r['chosen'] for r in read_jsonl(str(tmp_path / 'dpo.pairs.jsonl')))
+    grpo(load_config(GRPOConfig, None, common + [
+        f'init_from={sft_path}', f'out_path={tmp_path / "grpo.pt"}', 'batch_size=2', 'group_size=2', 'max_iters=1',
+        'tasks=["sub"]']))
+    assert {'reasoned', 'closed_think'} <= set(json.loads(open(tmp_path / 'grpo.metrics.jsonl').readlines()[-1]))
+    cli_main(['eval', '--model', sft_path, '--corpus', str(corpus), '--n-per-task', '2', '--tasks', 'sub', 'word',
+              '--show', '1', '--device', 'cpu'])
+    cli_main(['chat', '--model', sft_path, 'What is 5 - 3?', '--device', 'cpu'])
+
+
+def test_finished_stage_is_skipped_on_resume(tmp_path):
+    corpus = tmp_path / 'corpus.txt'
+    corpus.write_text(open(CORPUS).read()[:100_000])
+    options = [f'data_path={corpus}', f'out_path={tmp_path / "base.pt"}', 'model.n_embd=16', 'model.n_head=2',
+               'model.n_layer=1', 'model.block_size=32', 'batch_size=4', 'max_iters=2', 'eval_iters=1',
+               'sample_tokens=0', 'device=cpu', 'resume=true']
+    pretrain(load_config(PretrainConfig, None, options))
+    mtime = os.path.getmtime(tmp_path / 'base.pt')
+    model, _ = pretrain(load_config(PretrainConfig, None, options))
+    assert os.path.getmtime(tmp_path / 'base.pt') == mtime and isinstance(model, CharTransformerLanguageModel)
+
+
+def test_state_from_before_a_new_option_still_resumes(tmp_path):
+    from charlm.training import load_state, make_optimizer, save_state, state_path
+    model, cfg = tiny_model(), SFTConfig(out_path=str(tmp_path / 'm.pt'))
+    optimizer = make_optimizer(model, cfg)
+    save_state(cfg.out_path, model, optimizer, 4, cfg)
+    state = torch.load(state_path(cfg.out_path), weights_only=True)
+    del state['config']['reasoning'], state['precision']  # saved by an older charlm
+    torch.save(state, state_path(cfg.out_path))
+    assert load_state(cfg.out_path, model, optimizer, 'cpu', cfg)[0] == 4
+    with pytest.raises(ValueError, match='reasoning'):
+        load_state(cfg.out_path, model, optimizer, 'cpu', SFTConfig(out_path=cfg.out_path, reasoning=True))
+
+
+def test_data_files_directories_and_fast_encoding(tmp_path):
+    from charlm.data import encode_text_bytes, expand_paths, read_text_bytes, text_chars
+    (tmp_path / 'b.txt').write_bytes(b'second file\r\nwith CRLF\r\n')
+    (tmp_path / 'a.txt').write_text('first file\n' * 50)
+    (tmp_path / 'notes.json').write_text('{}')
+    assert expand_paths(str(tmp_path)) == [str(tmp_path / 'a.txt'), str(tmp_path / 'b.txt')]
+    assert expand_paths([str(tmp_path / '*.txt'), str(tmp_path / 'a.txt')]) == expand_paths(str(tmp_path))
+    with pytest.raises(FileNotFoundError):
+        expand_paths(str(tmp_path / 'missing.txt'))
+    tok = CharTokenizer()
+    buf = read_text_bytes(str(tmp_path / 'b.txt'))
+    assert bytes(buf) == b'second file\nwith CRLF\n' and text_chars(buf) == set('second filewthCRLF\n')
+    ids = encode_text_bytes(tok, buf)
+    assert ids.dtype == torch.uint8 and ids.tolist() == tok.encode(buf.decode(), allow_special=False)
+    unicode = bytearray('café\n'.encode())
+    with pytest.raises(ValueError, match='vocabulary'):
+        encode_text_bytes(tok, unicode)
+    assert encode_text_bytes(CharTokenizer.from_text('café'), unicode).tolist() == \
+        CharTokenizer.from_text('café').encode('café\n')
+    with pytest.raises(ValueError, match='vocabulary'):
+        encode_text_bytes(tok, bytearray(b'tab\there'))
+    # pretraining on a directory: each file's end is its validation part, capped by max_val_chars
+    from charlm.pretrain import load_splits
+    splits = load_splits(expand_paths(str(tmp_path)), tok, 0.5, 10)
+    assert len(splits['val']) == 20 and len(splits['train']) == 550 + 22 - 20
+
+
+def test_prepare_data_normalizes_and_skips_prepared_files(tmp_path):
+    from charlm.datasets import normalize, prepare
+    assert normalize('Café “yes” — ½\tcup…\x07') == 'Cafe "yes" - 1/2 cup...'
+    book = tmp_path / 'book.txt'
+    book.write_text('Title\n*** START OF THE PROJECT GUTENBERG EBOOK X ***\n\n\nTo be ’tis\n'
+                    '*** END OF THE PROJECT GUTENBERG EBOOK X ***\nlicense\n', encoding='utf-8')
+    out = str(tmp_path / 'shakespeare.txt')
+    prepare('shakespeare', out, url=book.as_uri())
+    assert open(out).read() == "To be 'tis\n"
+    stories = tmp_path / 'stories.txt'
+    stories.write_text('One.\n<|endoftext|>\nTwo.\n<|endoftext|>\nThree.\n')
+    out = str(tmp_path / 'tinystories.txt')
+    prepare('tinystories', out, url=stories.as_uri(), max_chars=10)
+    assert open(out).read() == 'One.\n\n'
+    mtime = os.path.getmtime(out)
+    prepare('tinystories', out, url=stories.as_uri(), max_chars=10)  # already prepared: skipped
+    assert os.path.getmtime(out) == mtime
+    prepare('tinystories', out, url=stories.as_uri())  # other options: prepared again
+    assert open(out).read() == 'One.\n\nTwo.\n\nThree.\n'
+    joined = str(tmp_path / 'joined.txt')
+    prepare('files', joined, files=[str(book), str(stories)])
+    assert open(joined).read().startswith('Title\n') and '\n\nOne.\n' in open(joined).read()
+    cli_main(['prepare-data', 'files', '--files', str(stories), '--out', str(tmp_path / 'cli.txt')])
+    assert os.path.exists(tmp_path / 'cli.json')

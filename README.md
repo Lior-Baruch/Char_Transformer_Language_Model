@@ -1,6 +1,7 @@
 # Character-Level Transformer Language Model
 
 [![tests](https://github.com/Lior-Baruch/Char_Transformer_Language_Model/actions/workflows/tests.yml/badge.svg)](https://github.com/Lior-Baruch/Char_Transformer_Language_Model/actions/workflows/tests.yml)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Lior-Baruch/Char_Transformer_Language_Model/blob/master/notebooks/colab_pipeline.ipynb)
 
 A small, readable PyTorch library for experimenting with the whole LLM training pipeline, one character at a time:
 
@@ -18,6 +19,8 @@ data/input.txt ───────────▶ base model ─────�
 4. **Reinforcement learning (GRPO).** The instruct model samples several answers per prompt and is rewarded for the correct ones.
 
 Every stage runs on a laptop CPU. The example models in `checkpoints/example/` were trained that way in about 70 minutes in total, and each stage measurably improves on the one before (see [Results](#results-of-the-example-models)).
+
+The models can also learn to **reason step by step**. Given `reasoning: true`, SFT teaches them to write a scratchpad between `<|think|>` and `<|/think|>` before answering a math question: addition, subtraction, multiplication, division and word problems such as "Adam has 12 apples to divide equally among 3 friends. How many each?" (see [Reasoning](#reasoning-step-by-step)). And for a bigger model, [a Colab notebook](#a-bigger-model-on-a-gpu-colab) pretrains a 59M-parameter model on a billion characters of [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) and fine-tunes it to reason.
 
 ## Install
 
@@ -55,7 +58,38 @@ python -m charlm grpo --config configs/example/grpo.json --set kl_coef=0 group_s
 python -m charlm pretrain --config configs/example/pretrain.json --set model.n_layer=6 --print-config
 ```
 
-Each run writes a checkpoint (`out_path`) and its metrics as JSON lines next to it (`*.metrics.jsonl`), ready for plotting and comparing runs. Every stage also saves its full training state at each evaluation (`*.state.pt`, deleted when the run finishes). If a run is interrupted, run the same command with `--set resume=true`. On a CPU it continues exactly where it left off, bit for bit. On a GPU the random-number state is restored too, but some GPU operations aren't deterministic, so the numbers can differ slightly. `configs/pretrain_gpu.json` is the original 10.8M-parameter model, for use on a GPU.
+Each run writes a checkpoint (`out_path`) and its metrics as JSON lines next to it (`*.metrics.jsonl`), ready for plotting and comparing runs. Every stage also saves its full training state at each evaluation (`*.state.pt`, deleted when the run finishes; `state_every=N` saves it every N evaluations instead, for big models). If a run is interrupted, run the same command with `--set resume=true`. On a CPU it continues exactly where it left off, bit for bit. On a GPU the random-number state is restored too, but some GPU operations aren't deterministic, so the numbers can differ slightly. With `resume=true`, a stage that already finished is skipped, so a whole pipeline can simply be rerun after a crash. Resuming refuses to continue a run whose settings changed, since that would mix two different runs.
+
+Training uses the GPU automatically when there is one (`device` defaults to `auto`). `precision` sets the number format: `fp32` (the default), `bf16`, `fp16`, or `auto`, which picks bf16 on GPUs that support it natively (A100, L4, RTX 30xx and newer), fp16 with loss scaling on older ones (T4, V100) and fp32 on a CPU. 16-bit training is several times faster on a GPU. `configs/pretrain_gpu.json` is the original 10.8M-parameter model, for use on a GPU.
+
+## A bigger model on a GPU (Colab)
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Lior-Baruch/Char_Transformer_Language_Model/blob/master/notebooks/colab_pipeline.ipynb)
+
+`notebooks/colab_pipeline.ipynb` runs the pipeline on a Colab GPU with the configs in `configs/colab/`:
+
+| stage | what it does | rough time on an A100 |
+|---|---|---|
+| data | download TinyStories and keep the first billion characters | ~5 min |
+| pretrain | 59M parameters (12 layers, 640-dim, 10 heads, 512-character context), 60,000 steps of 64 x 512 characters | ~2 h |
+| SFT | all nine checkable tasks, with reasoning | ~20 min |
+| GRPO | the five math tasks, 32 prompts x 16 replies per step | ~30 min |
+
+The times are estimates: this repository's own runs are on a CPU. An L4 is roughly three times slower, so the notebook has a `MAX_ITERS` setting to shorten pretraining. Training runs in bf16 (`"precision": "auto"`). Data and checkpoints are kept on Google Drive. If Colab disconnects, run all the cells again: finished stages are skipped and the interrupted one resumes from its last saved state.
+
+### More training data
+
+`prepare-data` downloads a corpus and cleans it to the tokenizer's characters (printable ASCII and newline: curly quotes become straight ones, accents are dropped, and so on):
+
+```bash
+python -m charlm prepare-data tinystories                      # ~2.7M short stories, ~2.2 GB -> data/tinystories.txt
+python -m charlm prepare-data tinystories --max-chars 50000000  # just the first 50M characters
+python -m charlm prepare-data shakespeare                      # the complete works, 5x data/input.txt -> data/shakespeare.txt
+python -m charlm prepare-data files --files my_texts/*.txt --out data/mine.txt   # your own text files
+python -m charlm pretrain --config configs/example/pretrain.json --set data_path=data/shakespeare.txt
+```
+
+The data is streamed, so it is never held in memory whole. A `.json` file next to the output records what was prepared, so running the same command again skips the download. The SFT tasks still take their words from `corpus_path` (`data/input.txt` by default), whatever the base model was pretrained on.
 
 ## Results of the example models
 
@@ -223,7 +257,7 @@ The building blocks are exposed too: `CharTransformerLanguageModel` and `ModelCo
 
 ### Tokenizer and chat template
 
-Each character is one token. The vocabulary is every printable ASCII character and newline, so digits and symbols that never appear in Shakespeare can still be used later. It also has four special tokens. A conversation turn looks like this:
+Each character is one token. The vocabulary is every printable ASCII character and newline, so digits and symbols that never appear in Shakespeare can still be used later. It also has four special tokens (six with the [reasoning tokens](#reasoning-tokens)). A conversation turn looks like this:
 
 ```
 <|user|>Reverse the word: love<|assistant|>evol<|end|>
@@ -236,12 +270,13 @@ A decoder-only transformer (`charlm/model.py`):
 - Pre-norm transformer blocks, each with causal multi-head self-attention and a feed-forward network (ReLU, 4x wide).
 - A final LayerNorm and a linear layer that outputs the next-token scores.
 
-Attention is scaled by 1/sqrt(head_size).
+Attention is scaled by 1/sqrt(head_size). When generating, a KV cache keeps each layer's keys and values, so each new token costs one position instead of the whole context.
 
 ### 1. Pretraining (`charlm/pretrain.py`)
 
 - Random 128-character windows of the text are used as training inputs, and the target at every position is the next character.
 - The last 10% of the text is held out as validation data.
+- `data_path` can be a file, a directory of `.txt` files, a pattern like `"data/*.txt"`, or a list of these. With several files, the end of each file is held out (at most `max_val_chars` characters per file). ASCII text is stored as one byte per character, so a 1 GB corpus fits in 1 GB of memory.
 - The learning rate follows a linear warmup, then a cosine decay.
 - The checkpoint with the lowest validation loss is kept, and training stops early once the validation loss stops improving.
 
@@ -253,7 +288,7 @@ Attention is scaled by 1/sqrt(head_size).
 
 ### Tasks (`charlm/tasks.py`)
 
-The instruction data is generated from the corpus. Five tasks have one correct answer, so a reply can be checked automatically:
+The instruction data is generated from the corpus. Every task except `speak` has one correct answer, so a reply can be checked automatically:
 
 | task | example prompt | answer |
 |---|---|---|
@@ -262,11 +297,37 @@ The instruction data is generated from the corpus. Five tasks have one correct a
 | spell | `Spell out: love` | `l-o-v-e` |
 | length | `How many letters are in "love"?` | `4` |
 | add | `What is 38 + 45?` | `83` |
+| sub | `What is 704 - 358?` | `346` |
+| mul | `What is 386 * 7?` | `2702` |
+| div | `What is 912 / 8?` | `114` |
+| word | `Adam has 12 apples to divide equally among 3 friends. How many each?` | `4` |
 | speak | `Say a line as ROMEO.` | a line ROMEO speaks in the play (SFT only, not checkable) |
 
 Because the answers can be checked, the same tasks give labeled data for SFT, correct/wrong pairs for DPO and a reward for GRPO.
 
-Words are 3 to 12 letters long, and numbers go up to 99. 20% of the words, number pairs and speeches are held out. All accuracy numbers are measured on those held-out prompts, so they show whether the model learned the task rather than memorized the training examples.
+The first five tasks are the defaults. `sub`, `mul`, `div` and `word` are used when a config lists them in `tasks`. Words are 3 to 12 letters long and `add` uses numbers up to 99. `sub` uses numbers up to 999 (never below zero), `mul` multiplies a number up to 999 by one digit, and `div` divides by one digit with no remainder. Word problems use one operation on small numbers, in four phrasings per operation.
+
+20% of the words, number problems and speeches are held out, and so is one phrasing of each word problem. All accuracy numbers are measured on those held-out prompts, so they show whether the model learned the task rather than memorized the training examples (or, for word problems, the phrasing).
+
+### Reasoning tokens
+
+With `reasoning: true`, SFT adds two special tokens, `<|think|>` and `<|/think|>`, and the replies to the math tasks show their work before the answer. The scratchpads work digit by digit, like arithmetic on paper, so each step is small enough for a tiny model to learn:
+
+```
+What is 47 + 85?   <|think|>7+5+0=12 A=2, 4+8+1=13 A=132 => 132<|/think|>132
+What is 82 - 47?   <|think|>2-7-0=5 b1 A=5, 8-4-1=3 b0 A=35 => 35<|/think|>35
+What is 47 * 6?    <|think|>7*6=42+0=42 A=2, 4*6=24+4=28 A=282 => 282<|/think|>282
+What is 84 / 6?    <|think|>08/6=1 r2 A=1, 24/6=4 r0 A=14 => 14<|/think|>14
+Maya has 12 cookies to divide equally among 3 friends. How many each?
+                   <|think|>12/3: 01/3=0 r1 A=0, 12/3=4 r0 A=04 => 4<|/think|>4
+```
+
+- Addition and multiplication go from the rightmost digit, writing the carry (`+1`). Subtraction writes the borrow (`b1`). Division goes from the left, writing the remainder (`r2`).
+- `A=` is the answer so far. The trace ends with `=> answer`, which the model then copies after `<|/think|>`.
+- Word problems first write the equation (`12/3:`), so the model has to work out which operation the story needs.
+- Only the final answer is scored. The evaluation also reports `trace/<task>`, the share of replies whose reasoning matches the taught method exactly.
+
+The tokens are appended after the existing ones, so a model without them (like `base.pt`) keeps every token id. The model's embedding grows by two rows (`model.resize_vocab`). DPO builds its chosen replies with the reasoning when the model has these tokens, and GRPO logs `closed_think`, the share of sampled replies that finish their reasoning within `max_new_tokens`. A reply that is cut off has no answer and gets reward 0.
 
 ### 3a. DPO (`charlm/dpo.py`)
 
@@ -297,7 +358,8 @@ loss = -min(ratio * A, clip(ratio, 1 - eps, 1 + eps) * A) + kl_coef * KL(π || �
 
 ## Experiment ideas
 
-- **Base model.** Scale the model or the context (`model.*`) and watch how the val loss and samples change. Or pretrain on your own text with `data_path`.
+- **Base model.** Scale the model or the context (`model.*`) and watch how the val loss and samples change. Or pretrain on more text (`prepare-data`) or your own (`data_path`).
+- **Reasoning.** Change the scratchpad format in `reasoning.py` (e.g. drop the running answer `A=`, or the carries) and see which parts the model needs. Or train on 2-digit numbers and test on 3-digit ones.
 - **SFT.** Train on less data (`n_train`), train on a subset of `tasks` and test on the others, or skip pretraining and see how much the base model helps.
 - **DPO.** Sweep `beta` and `nll_coef`. Or build the pairs from a different model than the one being trained (`data_path`).
 - **GRPO.** Sweep `kl_coef` (try 0), `group_size` and `temperature`, or set `updates_per_batch` > 1 so the clipping matters. Or give addition partial credit per correct digit, or add a task in `tasks.py` with its own reward.
@@ -307,23 +369,31 @@ loss = -min(ratio * A, clip(ratio, 1 - eps, 1 + eps) * A) + kl_coef * KL(π || �
 
 ```
 charlm/
-  tokenizer.py    character tokenizer with chat special tokens
-  model.py        the transformer, sampling, per-token log-probabilities
+  tokenizer.py    character tokenizer with chat (and reasoning) special tokens
+  model.py        the transformer, sampling with a KV cache, per-token log-probabilities
   checkpoint.py   save/load a model together with its config and tokenizer
   config.py       dataclass configs from JSON files + key=value overrides
-  training.py     shared training utilities (optimizer, LR schedule, metrics logging)
+  training.py     shared training utilities (optimizer, LR schedule, precision, resuming, metrics logging)
+  data.py         text files and batches
+  datasets.py     downloading and cleaning larger corpora (`prepare-data`)
   chat.py         chat template, loss masking, batched reply sampling
   tasks.py        synthetic instruction tasks with held-out splits and a reward
+  reasoning.py    the <|think|> reply format and the step-by-step arithmetic traces
   evaluation.py   task accuracy
   pretrain.py     stage 1
   sft.py          stage 2
   dpo.py          stage 3a
   grpo.py         stage 3b
   cli.py          `python -m charlm ...`
-configs/          example configs for each stage
+configs/
+  example/        the example models (CPU)
+  reasoning/      SFT and GRPO with and without reasoning (CPU)
+  colab/          the 59M-parameter pipeline (GPU)
+notebooks/colab_pipeline.ipynb   the GPU pipeline on Colab
 .github/workflows/tests.yml   CI: lint and tests on pull requests and pushes to master
+.github/workflows/data.yml    CI: checks that the dataset downloads still work (when the data code changes)
 checkpoints/example/   trained example models, their metrics and the DPO pairs
-  experiments/  metrics of the DPO and GRPO variants that didn't work
+  experiments/  metrics of the variants and comparison runs
 docs/             README figures and the scripts that make them (make_figures.py, make_examples.py)
 data/input.txt    Tiny Shakespeare (1.1M characters)
 tests/            pytest suite, including a tiny end-to-end run of the pipeline

@@ -26,9 +26,11 @@ from .config import to_dict
 from .data import load_text, pad_batch, read_jsonl, write_jsonl
 from .evaluation import evaluate_tasks
 from .model import token_logprobs
-from .tasks import VERIFIABLE_TASKS, TaskSuite, score
+from .reasoning import format_response
+from .tasks import VERIFIABLE_TASKS, TaskSuite, eval_tasks, score
 from .training import (MetricsLogger, TrainConfig, clear_state, load_state, make_optimizer, metrics_path,
-                       optimizer_step, resolve_device, save_state, set_seed, state_path)
+                       optimizer_step, resolve_device, save_state, set_seed, setup_precision, skip_if_finished,
+                       state_path)
 
 
 @dataclass
@@ -39,6 +41,9 @@ class DPOConfig(TrainConfig):
     data_path: Optional[str] = None  # JSONL with prompt/chosen/rejected; None = build pairs from the model's mistakes
     corpus_path: str = "data/input.txt"
     tasks: List[str] = field(default_factory=lambda: list(VERIFIABLE_TASKS))
+    # whether the chosen replies to math tasks include the step-by-step reasoning; None = when the model has the
+    # reasoning tokens (i.e. it was fine-tuned with reasoning=true)
+    reasoning: Optional[bool] = None
     n_pairs: int = 4000  # pairs to build when data_path is None
     samples_per_prompt: int = 4  # replies sampled per prompt when looking for a wrong one
     sample_temperature: float = 1.0
@@ -52,15 +57,16 @@ class DPOConfig(TrainConfig):
     warmup_iters: int = 20
     weight_decay: float = 0.0
     eval_interval: int = 100
-    eval_per_task: int = 50  # held-out examples per verifiable task for measuring accuracy (0 = skip)
-    max_new_tokens: int = 32
+    eval_per_task: int = 50  # held-out examples per evaluated task for measuring accuracy (0 = skip)
+    max_new_tokens: int = 32  # reply length limit when sampling and evaluating (reasoning replies need ~100)
     dropout: Optional[float] = 0.0  # dropout would make the log-probabilities noisy
 
 
 def build_preference_pairs(model, tokenizer, suite, n_pairs, tasks=VERIFIABLE_TASKS, samples_per_prompt=4,
-                           temperature=1.0, max_new_tokens=32, seed=0, prompts_per_round=512, max_rounds=50):
+                           temperature=1.0, max_new_tokens=32, seed=0, prompts_per_round=512, max_rounds=50,
+                           reasoning=False):
     """ sample replies to training prompts; for each prompt the model got wrong at least once, pair the correct
-    answer (chosen) with one of the wrong replies (rejected) """
+    reply (chosen: the answer, preceded by its reasoning trace if reasoning) with one of the wrong ones (rejected) """
     rng = random.Random(seed)
     pairs = []
     for round_ in range(max_rounds):
@@ -70,8 +76,9 @@ def build_preference_pairs(model, tokenizer, suite, n_pairs, tasks=VERIFIABLE_TA
         for example, group in zip(examples, replies):
             wrong = [text for _, text in group if score(example, text) == 0.0]
             if wrong:
+                chosen = format_response(example.answer, example.reasoning if reasoning else '')
                 pairs.append({'task': example.task, 'prompt': example.prompt,
-                              'chosen': example.answer, 'rejected': rng.choice(wrong)})
+                              'chosen': chosen, 'rejected': rng.choice(wrong)})
                 if len(pairs) == n_pairs:
                     return pairs
     print(f"found only {len(pairs)} pairs: the model rarely makes mistakes on these tasks")
@@ -131,12 +138,17 @@ def dpo(cfg):
     """ trains cfg.init_from with DPO, saves the final model, returns (model, tokenizer) """
     set_seed(cfg.seed)
     device = resolve_device(cfg.device)
+    done = skip_if_finished(cfg, device)
+    if done:
+        return done
     model, tokenizer, _ = load_checkpoint(cfg.init_from, device, dropout=cfg.dropout)
     ref_model, ref_tokenizer, _ = load_checkpoint(cfg.ref_from or cfg.init_from, device, dropout=0.0)
     if ref_tokenizer.to_dict() != tokenizer.to_dict():
         raise ValueError("the reference model's tokenizer differs from the policy's, so their "
                          "log-probabilities can't be compared")
     ref_model.eval().requires_grad_(False)
+    scaler = setup_precision(cfg, device, model, ref_model)
+    reasoning = tokenizer.has_reasoning_tokens if cfg.reasoning is None else cfg.reasoning
     suite = TaskSuite(load_text(cfg.corpus_path))
 
     pairs_path = os.path.splitext(cfg.out_path)[0] + '.pairs.jsonl'
@@ -148,7 +160,7 @@ def dpo(cfg):
     else:
         print(f"building {cfg.n_pairs} preference pairs from {cfg.init_from}'s own mistakes...")
         rows = build_preference_pairs(model, tokenizer, suite, cfg.n_pairs, cfg.tasks, cfg.samples_per_prompt,
-                                      cfg.sample_temperature, cfg.max_new_tokens, seed=cfg.seed)
+                                      cfg.sample_temperature, cfg.max_new_tokens, seed=cfg.seed, reasoning=reasoning)
         write_jsonl(pairs_path, rows)
         print(f"saved {len(rows)} pairs to {pairs_path}")
     random.Random(cfg.seed).shuffle(rows)
@@ -161,12 +173,12 @@ def dpo(cfg):
     val, train = pairs[:n_val], pairs[n_val:]
     ref_chosen, ref_rejected = reference_logprobs(ref_model, pairs, tokenizer.pad_id, device)
     val_ref, train_ref = (ref_chosen[:n_val], ref_rejected[:n_val]), (ref_chosen[n_val:], ref_rejected[n_val:])
-    eval_set = suite.eval_set(cfg.eval_per_task) if cfg.eval_per_task else []  # all tasks, not just trained ones
+    eval_set = suite.eval_set(cfg.eval_per_task, eval_tasks(cfg.tasks)) if cfg.eval_per_task else []
     print(f"device {device} | {len(train)} train / {len(val)} val pairs | {len(eval_set)} eval prompts")
 
     rng = random.Random(cfg.seed)
     optimizer = make_optimizer(model, cfg)
-    start_iter, state = (load_state(cfg.out_path, model, optimizer, device, to_dict(cfg), rng=rng)
+    start_iter, state = (load_state(cfg.out_path, model, optimizer, device, cfg, scaler, rng=rng)
                          if cfg.resume else (0, None))
     logger = MetricsLogger(metrics_path(cfg.out_path), append=state is not None)
     train_stats, metrics = [], {}
@@ -180,7 +192,8 @@ def dpo(cfg):
             if eval_set:
                 metrics.update(evaluate_tasks(model, tokenizer, eval_set, cfg.max_new_tokens))
             logger.log(it, **metrics)
-            save_state(cfg.out_path, model, optimizer, it, to_dict(cfg), rng=rng)
+            if (it // cfg.eval_interval) % cfg.state_every == 0:
+                save_state(cfg.out_path, model, optimizer, it, cfg, scaler, rng=rng)
         if it == cfg.max_iters:
             break
 
@@ -191,12 +204,12 @@ def dpo(cfg):
         if cfg.nll_coef:
             n_tokens = torch.tensor([sum(t != -100 for t in c[1]) for c, _ in batch], device=device)
             loss = loss + cfg.nll_coef * (-chosen / n_tokens).mean()  # mean next-token loss of the chosen replies
-        optimizer_step(model, optimizer, loss, it, cfg)
+        optimizer_step(model, optimizer, loss, it, cfg, scaler)
         train_stats.append({'loss': loss.item(), 'reward_acc': stats['reward_acc'],
                             'chosen_reward': stats['chosen_reward'], 'rejected_reward': stats['rejected_reward']})
 
     save_checkpoint(cfg.out_path, model, tokenizer, {'stage': 'dpo', 'iter': cfg.max_iters, **metrics,
-                                                     'config': to_dict(cfg)})
+                                                     'config': to_dict(cfg), 'finished': True})
     clear_state(cfg.out_path)
     print(f"saved model to {cfg.out_path}")
     return model, tokenizer

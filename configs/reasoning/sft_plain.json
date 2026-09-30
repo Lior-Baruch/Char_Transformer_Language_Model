@@ -1,0 +1,28 @@
+{
+  "init_from": "checkpoints/example/base.pt",
+  "out_path": "checkpoints/example/experiments/sft_plain.pt",
+  "corpus_path": "data/input.txt",
+  "tasks": [
+    "reverse",
+    "uppercase",
+    "spell",
+    "length",
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "word"
+  ],
+  "reasoning": false,
+  "n_train": 100000,
+  "n_val": 1000,
+  "batch_size": 64,
+  "max_iters": 5000,
+  "eval_interval": 250,
+  "learning_rate": 0.001,
+  "min_lr": 0.0001,
+  "warmup_iters": 100,
+  "eval_per_task": 50,
+  "max_new_tokens": 100,
+  "patience": 0
+}

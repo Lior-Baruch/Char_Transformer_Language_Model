@@ -1,0 +1,20 @@
+{
+  "init_from": "checkpoints/colab/sft.pt",
+  "out_path": "checkpoints/colab/grpo.pt",
+  "corpus_path": "data/input.txt",
+  "tasks": ["add", "sub", "mul", "div", "word"],
+  "batch_size": 32,
+  "group_size": 16,
+  "temperature": 1.0,
+  "max_new_tokens": 128,
+  "kl_coef": 0.04,
+  "max_iters": 500,
+  "eval_interval": 50,
+  "learning_rate": 3e-5,
+  "min_lr": 3e-6,
+  "warmup_iters": 20,
+  "eval_per_task": 100,
+  "precision": "auto",
+  "resume": true,
+  "state_every": 2
+}

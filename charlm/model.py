@@ -1,4 +1,5 @@
 """A GPT-style (decoder-only) transformer language model."""
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -28,13 +29,22 @@ class CausalSelfAttention(nn.Module):
         self.attn_dropout = config.dropout
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x):
+    def forward(self, x, cache=None):
+        """ cache: a dict that keeps this layer's keys and values between calls during generation, so each new
+        token only computes its own (a "KV cache"); it must start empty, and later calls pass one token at a time """
         B, T, C = x.shape
         q, k, v = self.qkv(x).split(C, dim=2)  # 3 x (B, T, C)
         # split the channels into heads, (B, T, C) -> (B, H, T, C/H)
         q, k, v = (t.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) for t in (q, k, v))
+        causal = True
+        if cache is not None:
+            if 'k' in cache:
+                assert T == 1, "after the first call, a KV cache takes one new token at a time"
+                k, v = torch.cat((cache['k'], k), dim=2), torch.cat((cache['v'], v), dim=2)
+                causal = False  # the single new token may attend to every cached position
+            cache['k'], cache['v'] = k, v
         # softmax(q @ k^T / sqrt(head_size)) @ v, with future positions masked out
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True,
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=causal,
                                            dropout_p=self.attn_dropout if self.training else 0.0)
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # concatenate the heads, (B, H, T, C/H) -> (B, T, C)
         return self.resid_dropout(self.proj(y))
@@ -66,8 +76,8 @@ class TransformerBlock(nn.Module):
         self.ln2 = nn.LayerNorm(config.n_embd)
         self.ffwd = FeedForward(config)
 
-    def forward(self, x):
-        x = x + self.sa(self.ln1(x))  # pre-norm + residual connection
+    def forward(self, x, cache=None):
+        x = x + self.sa(self.ln1(x), cache)  # pre-norm + residual connection
         x = x + self.ffwd(self.ln2(x))
         return x
 
@@ -84,6 +94,9 @@ class CharTransformerLanguageModel(nn.Module):
         self.ln_f = nn.LayerNorm(config.n_embd)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size)  # (C, V)
         self.apply(self._init_weights)
+        # mixed precision: None computes in float32; torch.bfloat16 or torch.float16 runs the forward pass under
+        # torch.autocast (set by the trainers from their precision option; not saved in checkpoints)
+        self.autocast_dtype = None
 
     @staticmethod
     def _init_weights(module):
@@ -95,32 +108,70 @@ class CharTransformerLanguageModel(nn.Module):
     def num_params(self):
         return sum(p.numel() for p in self.parameters())
 
-    def forward(self, idx, targets=None):
+    def resize_vocab(self, vocab_size):
+        """ grow the token embedding and the output layer to vocab_size, e.g. after tokenizer.add_special_tokens.
+        Existing rows (and the output bias) are kept, so the model behaves exactly as before on the old tokens """
+        old = self.config.vocab_size
+        if vocab_size == old:
+            return
+        assert vocab_size > old, "the vocabulary can only grow"
+        weight = self.token_embedding.weight
+        embedding = nn.Embedding(vocab_size, self.config.n_embd).to(weight.device, weight.dtype)
+        head = nn.Linear(self.config.n_embd, vocab_size).to(weight.device, weight.dtype)
+        self._init_weights(embedding)
+        self._init_weights(head)
+        with torch.no_grad():
+            embedding.weight[:old] = self.token_embedding.weight
+            head.weight[:old] = self.lm_head.weight
+            head.bias[:old] = self.lm_head.bias
+            # new tokens start near the average old token (plus the usual small random part), so the model gives
+            # them a typical probability instead of almost none, and learns them faster
+            embedding.weight[old:] += self.token_embedding.weight.mean(dim=0)
+            head.weight[old:] += self.lm_head.weight.mean(dim=0)
+            head.bias[old:] = self.lm_head.bias.mean()
+        self.token_embedding, self.lm_head = embedding, head
+        self.config.vocab_size = vocab_size
+
+    def forward(self, idx, targets=None, cache=None, start_pos=0):
         """ idx: (B, T) token ids. targets: (B, T) next-token ids, -100 where no loss should be computed.
+        cache/start_pos: a KV cache (one dict per block) and the position of idx's first token, for generation.
         returns logits (B, T, V) and the mean cross-entropy loss (or None without targets) """
         B, T = idx.shape
-        assert T <= self.config.block_size, f"sequence length {T} exceeds block_size {self.config.block_size}"
-        pos = torch.arange(T, device=idx.device)
-        x = self.token_embedding(idx) + self.position_embedding(pos)  # (B, T, C)
-        x = self.blocks(x)
-        logits = self.lm_head(self.ln_f(x))  # (B, T, V)
+        assert start_pos + T <= self.config.block_size, \
+            f"sequence length {start_pos + T} exceeds block_size {self.config.block_size}"
+        autocast = (torch.autocast(device_type=idx.device.type, dtype=self.autocast_dtype)
+                    if self.autocast_dtype is not None else nullcontext())
+        with autocast:
+            pos = torch.arange(start_pos, start_pos + T, device=idx.device)
+            x = self.token_embedding(idx) + self.position_embedding(pos)  # (B, T, C)
+            for i, block in enumerate(self.blocks):
+                x = block(x, cache[i] if cache is not None else None)
+            logits = self.lm_head(self.ln_f(x))  # (B, T, V)
 
-        loss = None
-        if targets is not None:
-            loss = F.cross_entropy(logits.view(B * T, -1), targets.reshape(B * T), ignore_index=-100)
+            loss = None
+            if targets is not None:
+                loss = F.cross_entropy(logits.view(B * T, -1).float(), targets.reshape(B * T), ignore_index=-100)
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, stop_token=None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, stop_token=None, use_cache=True):
         """ extend idx (B, T) by sampling up to max_new_tokens tokens.
         temperature 0 picks the most likely token. Once a row samples stop_token, it keeps emitting stop_token,
-        and generation ends early when every row has stopped. """
+        and generation ends early when every row has stopped. When the whole sequence fits in block_size, a KV
+        cache avoids recomputing the earlier tokens; longer generations slide a block_size window instead """
         was_training = self.training
         self.eval()
         finished = torch.zeros(idx.shape[0], dtype=torch.bool, device=idx.device)
-        for _ in range(max_new_tokens):
-            logits, _ = self(idx[:, -self.config.block_size:])  # crop to the last block_size tokens
-            logits = logits[:, -1, :]  # only the last position predicts the next token, (B, V)
+        cache = ([{} for _ in self.blocks] if use_cache and idx.shape[1] + max_new_tokens <= self.config.block_size
+                 else None)
+        for step in range(max_new_tokens):
+            if cache is None:
+                logits, _ = self(idx[:, -self.config.block_size:])  # crop to the last block_size tokens
+            elif step == 0:
+                logits, _ = self(idx, cache=cache)
+            else:
+                logits, _ = self(idx[:, -1:], cache=cache, start_pos=idx.shape[1] - 1)
+            logits = logits[:, -1, :].float()  # only the last position predicts the next token, (B, V)
             if temperature == 0:
                 idx_next = logits.argmax(dim=-1, keepdim=True)
             else:

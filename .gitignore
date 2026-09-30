@@ -6,3 +6,6 @@
 *.state.pt
 __pycache__/
 *.egg-info/
+# training logs of the demo runs
+logs/
+*.tmp
