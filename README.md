@@ -42,6 +42,15 @@ python -m charlm generate --model checkpoints/example/base.pt --prompt "ROMEO:" 
 python -m charlm eval --model checkpoints/example/{sft,dpo,grpo}.pt --show 2
 ```
 
+The reasoning model shows its work before answering:
+
+```bash
+python -m charlm chat --model checkpoints/example/sft_reasoning.pt "What is 386 * 7?"
+# [thinking: 6*7=42+0=42 A=2, 8*7=56+4=60 A=02, 3*7=21+6=27 A=2702 => 2702] 2702
+python -m charlm chat --model checkpoints/example/sft_reasoning.pt "Adam has 12 apples to divide equally among 3 friends. How many each?"
+# [thinking: 12/3: 01/3=0 r1 A=0, 12/3=4 r0 A=04 => 4] 4
+```
+
 Train the whole pipeline yourself (each stage reads the previous stage's checkpoint):
 
 ```bash
@@ -235,6 +244,75 @@ The "Say a line as …" task has no single right answer, so DPO and GRPO don't t
 | Say a line as Nurse. | I would I have so so. | I would I have so. |
 
 They sound Shakespearean, if not very meaningful. GRPO gives the same line for two different speakers.
+
+## Reasoning step by step
+
+Does writing out the steps help a 1.8M-parameter model do arithmetic? To find out, two SFT runs start from the same `base.pt`, with the same 100,000 examples of nine tasks (`reverse`, `uppercase`, `spell`, `length` and the math tasks `add`, `sub`, `mul`, `div`, `word`), the same 5,000 steps and the same batch size. The only difference is the replies to the math tasks: the plain model answers directly, the reasoning model first writes the [scratchpad](#reasoning-tokens). Both then get 300 steps of GRPO on the five math tasks (16 prompts x 8 replies). Accuracy on 500 held-out prompts per task:
+
+```bash
+python -m charlm sft --config configs/reasoning/sft_reasoning.json   # ~65 min on 2 CPU cores
+python -m charlm sft --config configs/reasoning/sft_plain.json       # ~35 min (not in the repository, only its metrics)
+python -m charlm grpo --config configs/reasoning/grpo_reasoning.json
+python -m charlm eval --model checkpoints/example/sft_reasoning.pt --tasks add sub mul div word --n-per-task 500 --show 5
+```
+
+| model | reverse | uppercase | spell | length | add | sub | mul | div | word | overall |
+|---|---|---|---|---|---|---|---|---|---|---|
+| SFT | 99.2% | 100% | 100% | 100% | 8.0% | 4.4% | 30.6% | 20.6% | 4.4% | 51.9% |
+| SFT + GRPO | 98.8% | 100% | 99.8% | 100% | 10.4% | 5.6% | 31.0% | 24.4% | 3.4% | 52.6% |
+| SFT + reasoning (`sft_reasoning.pt`) | 99.2% | 99.4% | 99.4% | 100% | **99.6%** | **100%** | **100%** | 99.0% | 21.6% | 90.9% |
+| SFT + reasoning + GRPO (`grpo_reasoning.pt`) | 99.0% | 99.4% | 99.4% | 100% | **99.6%** | **100%** | **100%** | **99.4%** | **33.8%** | **92.3%** |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_final_dark.png">
+  <img alt="Grouped bar chart of held-out accuracy of four models on add, sub, mul, div, word and all nine tasks. The plain SFT model scores 4% to 31% on the arithmetic tasks, and GRPO barely changes that. Both reasoning models score 99% to 100%. On word problems the plain models score under 5%, the reasoning model 22% and 34% after GRPO. Overall: 52%, 53%, 91% and 92%." src="docs/figures/reasoning_final.png">
+</picture>
+
+**The scratchpad solves the arithmetic.** Without it, SFT gets 8% of held-out additions right, 4% of subtractions, 31% of multiplications and 21% of divisions. With it, 99-100% on all four, with 3-digit numbers. The model, the prompts and the number of steps are the same. Without a scratchpad, the model must produce the first digit of `386 * 7 = 2702` before it has worked out the carries that decide it. With one, each step needs only a few symbols written just before it: `8*7=56+4=60` needs the digit, the multiplier and the carry from the step before. The model also follows the method exactly: on add, sub, mul and div, 99-100% of its scratchpads are the taught trace, character for character.
+
+The price is length: a reasoning reply to a math question is ~55 tokens instead of ~4, so the reasoning SFT run took almost twice as long on the same hardware (63 minutes instead of 36).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_sft_dark.png">
+  <img alt="Five small line charts of held-out accuracy during SFT on add, sub, mul, div and word, for the plain and the reasoning model. The reasoning model reaches 100% on mul by step 2,000, on add and sub by step 3,250 and on div by step 4,250. The plain model stays at or below 28%. On word problems the reasoning model stays between 16% and 28% after step 1,000, and the plain one under 6%." src="docs/figures/reasoning_sft.png">
+</picture>
+
+**Word problems are about language, not arithmetic.** The reasoning model gets 22% of the held-out word problems. They are asked in a fourth phrasing it never saw. The same problems asked in one of its three training phrasings get 98%:
+
+| model | phrasing | accuracy | reads the story right (right equation) | + | - | * | / |
+|---|---|---|---|---|---|---|---|
+| SFT + reasoning | never trained on | 22% | 28% | 25% | 2% | 1% | 60% |
+| SFT + reasoning | trained on | 98% | 100% | 100% | 100% | 100% | 92% |
+| SFT + reasoning + GRPO | never trained on | 34% | 33% | 45% | 1% | 22% | 71% |
+| SFT + reasoning + GRPO | trained on | 97% | 100% | 100% | 100% | 100% | 89% |
+
+With the new phrasing, the model writes the wrong equation first. It reads "There are 7 marbles and 8 more arrive" as `87+8`, and "Adam puts 20 stickers into 5 equal groups" as `20+5`. Three phrasings per operation are not enough for a character-level model to learn what the words mean. More phrasings, or a bigger model pretrained on more English (like the [Colab model](#a-bigger-model-on-a-gpu-colab)), are the natural next experiments.
+
+**GRPO has little left to teach, but it helps with the new phrasing.** The reasoning model already gets 99% of its sampled training replies right, so only ~5% of the groups contain both a right and a wrong reply, and only those carry a learning signal. The arithmetic stays at 99-100%. Still, held-out word problems rise from 22% to 34%, although GRPO trains only on the three training phrasings. The gain comes from reading the new phrasing better: multiplication stories go from 1% to 22%, addition stories from 25% to 45%. The plain model's GRPO run goes nowhere: its reward stays near 20%, and no task's held-out accuracy moves by more than 4 points. GRPO took 5 minutes for the plain model and 13 for the reasoning one.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_grpo_dark.png">
+  <img alt="Two line charts over 300 GRPO steps. Reward: the reasoning model gets 98-99% of its sampled replies right throughout, the plain model 16-22%. Held-out word problems in the new phrasing: the reasoning model rises from 18% to 28% (50 prompts), the plain model stays at 0-4%." src="docs/figures/reasoning_grpo.png">
+</picture>
+
+Replies of the two SFT models to the first held-out prompts of each math task (greedy):
+
+| prompt | expected | SFT | SFT + reasoning |
+|---|---|---|---|
+| What is 65 + 11? | `76` | `78` ✗ | `<\|think\|>5+1+0=06 A=6, 6+1+0=07 A=076 => 76<\|/think\|>76` ✓ |
+| What is 83 + 41? | `124` | `127` ✗ | `<\|think\|>3+1+0=04 A=4, 8+4+0=12 A=124 => 124<\|/think\|>124` ✓ |
+| What is 324 - 172? | `152` | `177` ✗ | `<\|think\|>4-2-0=2 b0 A=2, 2-7-0=5 b1 A=52, 3-1-1=1 b0 A=152 => 152<\|/think\|>152` ✓ |
+| What is 585 - 559? | `26` | `10` ✗ | `<\|think\|>5-9-0=6 b1 A=6, 8-5-1=2 b0 A=26, 5-5-0=0 b0 A=026 => 26<\|/think\|>26` ✓ |
+| What is 370 * 2? | `740` | `740` ✓ | `<\|think\|>0*2=00+0=00 A=0, 7*2=14+0=14 A=40, 3*2=06+1=07 A=0740 => 740<\|/think\|>740` ✓ |
+| What is 139 * 7? | `973` | `973` ✓ | `<\|think\|>9*7=63+0=63 A=3, 3*7=21+6=27 A=73, 1*7=07+2=09 A=0973 => 973<\|/think\|>973` ✓ |
+| What is 468 / 6? | `78` | `81` ✗ | `<\|think\|>04/6=0 r4 A=0, 46/6=7 r4 A=07, 48/6=8 r0 A=078 => 78<\|/think\|>78` ✓ |
+| What is 3520 / 8? | `440` | `480` ✗ | `<\|think\|>03/8=0 r3 A=0, 35/8=4 r3 A=04, 32/8=4 r0 A=044, 00/8=0 r0 A=0440 => 440<\|/think\|>440` ✓ |
+| Omer puts 12 marbles into 4 equal groups. How many per group? | `3` | `5` ✗ | `<\|think\|>12/4: 01/4=0 r1 A=0, 12/4=3 r0 A=03 => 3<\|/think\|>3` ✓ |
+| Lily packs 5 cards into each of 3 boxes. How many cards? | `15` | `25` ✗ | `<\|think\|>55/3: 05/3=1 r0 A=1, 05/3=1 r0 A=11 => 11<\|/think\|>11` ✗ |
+
+The last one shows the word-problem failure: in the unfamiliar phrasing, the model reads "5 cards into each of 3 boxes" as a division, `55/3`.
+
+The plain models are not in the repository, only their metrics (`checkpoints/example/experiments/`); `docs/make_reasoning_figures.py` makes the figures and tables from them.
 
 ## Using it as a library
 

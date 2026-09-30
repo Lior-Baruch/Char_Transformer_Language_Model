@@ -61,9 +61,9 @@ def sft_curves(t):
             ('SFT + reasoning', read_metrics('sft_reasoning.metrics.jsonl'))]
     fig, axes = new_figure(t, 'SFT with and without reasoning: held-out accuracy on the math tasks',
                            'Measured every 250 steps on 50 held-out prompts per task. Same data, steps and '
-                           'batch size; only the replies differ.', ncols=5, height=3.2, top=0.66, wspace=0.35)
+                           'batch size; only the replies differ.', ncols=5, height=3.3, top=0.62, wspace=0.35)
     fig.subplots_adjust(right=0.97)
-    legend(fig, t, [name for name, _ in runs], y=0.8)
+    legend(fig, t, [name for name, _ in runs], y=0.79)
     for ax, task in zip(axes, MATH):
         for color, (_, rows) in zip(t['series'], runs):
             x, acc = column(rows, f'acc/{task}', 100)
@@ -81,18 +81,16 @@ def grpo_curves(t):
     runs = [('SFT + GRPO', read_metrics('experiments/grpo_plain.metrics.jsonl')),
             ('SFT + reasoning + GRPO', read_metrics('grpo_reasoning.metrics.jsonl'))]
     fig, axes = new_figure(t, 'GRPO on the math tasks, with and without reasoning',
-                           'Left: the share of correct sampled replies in each step\'s groups. Right: held-out '
-                           'accuracy on the five math tasks (50 prompts each).', ncols=2, top=0.66)
+                           'Left: the share of correct replies among those sampled in training. Right: held-out '
+                           'word problems (50 prompts).', ncols=2, top=0.66)
     legend(fig, t, [name for name, _ in runs], y=0.83)
     for color, (_, rows) in zip(t['series'], runs):
         x, reward = column(rows, 'reward', 100)
         line(axes[0], t, x, reward, color, f'{reward[-1]:.0f}%')
-        math_rows = [r for r in rows if all(f'acc/{k}' in r for k in MATH)]
-        x = [r['step'] for r in math_rows]
-        acc = [100 * sum(r[f'acc/{k}'] for k in MATH) / len(MATH) for r in math_rows]
+        x, acc = column(rows, 'acc/word', 100)
         line(axes[1], t, x, acc, color, f'{acc[-1]:.0f}%')
-    panel_title(axes[0], t, 'reward on sampled replies')
-    panel_title(axes[1], t, 'math accuracy (held-out, greedy)')
+    panel_title(axes[0], t, 'reward (correct sampled replies)')
+    panel_title(axes[1], t, 'word problems, new phrasing (greedy)')
     for ax in axes:
         percent_axis(ax)
         axis_label(ax, t, x='GRPO step')
@@ -112,8 +110,8 @@ def final_bars(t, results):
     series = [blend(t['series'][0], t['surface'], 0.45), t['series'][0],
               blend(t['series'][1], t['surface'], 0.45), t['series'][1]]
     fig, (ax,) = new_figure(t, f'Math accuracy of the four models on {EVAL_PER_TASK} held-out prompts per task',
-                            'Word problems are asked in a phrasing never seen in training. "all 9 tasks" '
-                            'includes the four word tasks.')
+                            'Word problems are asked in a phrasing never seen in training. "all 9 tasks" also '
+                            'includes reverse, uppercase, spell and length.')
     fig.subplots_adjust(right=0.97)
     legend(fig, dict(t, series=series), labels, y=0.83, kind='bar')
     ax.set_xlim(-0.5, len(groups) - 0.5)
@@ -169,9 +167,22 @@ def examples(results, per_task=2):
         print(f'| {e.prompt} | {cell(e.answer)} | ' + ' | '.join(marks) + ' |')
 
 
-def word_phrasings(label='SFT + reasoning', n=500):
-    """ word problems with held-out numbers, asked in the held-out phrasing and in a training phrasing: accuracy,
-    how often the equation the model writes first is right, and the accuracy per operation """
+def equation_value(reasoning):
+    """ the result of the equation a word problem's reasoning starts with ("12/3: ..." -> 4), or None """
+    import re
+    match = re.match(r'(\d+)([-+*/])(\d+):', reasoning)
+    if not match:
+        return None
+    a, op, b = int(match.group(1)), match.group(2), int(match.group(3))
+    if op == '/':
+        return a // b if b and a % b == 0 else None
+    return {'+': a + b, '-': a - b, '*': a * b}[op]
+
+
+def word_phrasings(label='SFT + reasoning'):
+    """ the evaluation's word problems (held-out numbers), asked in the held-out phrasing and in a training phrasing:
+    accuracy, how often the equation the model writes first has the right result (i.e. it read the story right,
+    whether or not it then computes it right), and the accuracy per operation """
     import random
     import re
     sys.path.insert(0, ROOT)
@@ -182,7 +193,8 @@ def word_phrasings(label='SFT + reasoning', n=500):
     path = dict(MODELS)[label]
     model, tokenizer, _ = load_checkpoint(os.path.join(EXAMPLE, f'{path}.pt'))
     suite = TaskSuite(open(os.path.join(ROOT, 'data', 'input.txt')).read())
-    held_out = suite.eval_set(n, ['word'])
+    held_out = [e for e in suite.eval_set(EVAL_PER_TASK, TASKS) if e.task == 'word']
+    n = len(held_out)
     rng = random.Random(0)
     equation = lambda e: re.match(r'(\d+)([-+*/])(\d+)', e.reasoning).groups()
     trained = [Example('word', rng.choice(WORD_TEMPLATES[op][:-1]).format(n=rng.choice(NAMES), i=rng.choice(ITEMS),
@@ -195,7 +207,7 @@ def word_phrasings(label='SFT + reasoning', n=500):
         replies = [r[0][1] for r in sample_replies(model, tokenizer, [e.prompt for e in examples],
                                                    max_new_tokens=MAX_NEW_TOKENS, temperature=0.0)]
         right = [score(e, r) for e, r in zip(examples, replies)]
-        equations = [split_reply(r)[0].split(':')[0] == e.reasoning.split(':')[0] for e, r in zip(examples, replies)]
+        equations = [equation_value(split_reply(r)[0]) == int(e.answer) for e, r in zip(examples, replies)]
         per_op = [[x for x, e in zip(right, examples) if equation(e)[1] == op] for op in '+-*/']
         reasons = any(THINK in r for r in replies)
         print(f"| {name} | {100 * sum(right) / n:.0f}% | {f'{100 * sum(equations) / n:.0f}%' if reasons else '-'} | "
@@ -210,7 +222,8 @@ def main():
     results = evaluate()
     tables(results)
     examples(results)
-    word_phrasings()
+    for label in ('SFT + reasoning', 'SFT + reasoning + GRPO'):
+        word_phrasings(label)
     for theme_name, t in THEMES.items():
         save(sft_curves(t), 'reasoning_sft', theme_name)
         save(grpo_curves(t), 'reasoning_grpo', theme_name)
