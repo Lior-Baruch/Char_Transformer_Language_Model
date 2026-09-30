@@ -20,8 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from make_figures import (EXAMPLE, OUT, ROOT, THEMES, axis_label, column, legend, line, new_figure,  # noqa: E402
                           panel_title, percent_axis, read_metrics, rounded_bar, save, thousands)
 
-MODELS = [('SFT', 'experiments/sft_plain'), ('SFT + reasoning', 'sft_reasoning'),
-          ('SFT + GRPO', 'experiments/grpo_plain'), ('SFT + reasoning + GRPO', 'grpo_reasoning')]
+MODELS = [('SFT', 'experiments/sft_plain'), ('SFT + GRPO', 'experiments/grpo_plain'),
+          ('SFT + reasoning', 'sft_reasoning'), ('SFT + reasoning + GRPO', 'grpo_reasoning')]
 TASKS = ['reverse', 'uppercase', 'spell', 'length', 'add', 'sub', 'mul', 'div', 'word']
 MATH = ['add', 'sub', 'mul', 'div', 'word']
 EVAL_PER_TASK = 500
@@ -94,10 +94,18 @@ def grpo_curves(t):
     return fig
 
 
+def blend(color, surface, amount):
+    """ color mixed with the chart surface: a lighter (or, on dark, dimmer) shade of the same hue """
+    c, s = (tuple(int(h[i:i + 2], 16) for i in (1, 3, 5)) for h in (color, surface))
+    return '#' + ''.join(f'{round(a * amount + b * (1 - amount)):02x}' for a, b in zip(c, s))
+
+
 def final_bars(t, results):
     groups = MATH + ['all 9 tasks']
     labels = [label for label, _ in MODELS]
-    series = t['series'] + [t['ink2']]
+    # one hue per arm (plain, reasoning); the SFT model in a light shade, the model after GRPO in the full color
+    series = [blend(t['series'][0], t['surface'], 0.45), t['series'][0],
+              blend(t['series'][1], t['surface'], 0.45), t['series'][1]]
     fig, (ax,) = new_figure(t, f'Math accuracy of the four models on {EVAL_PER_TASK} held-out prompts per task',
                             'Word problems are asked in a phrasing never seen in training. "all 9 tasks" '
                             'includes the four word tasks.')
