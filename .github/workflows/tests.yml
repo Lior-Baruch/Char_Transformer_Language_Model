@@ -1,0 +1,32 @@
+# Runs the linter and the test suite on every pull request and every push to master.
+# Results show up as a check on the pull request and in the repository's Actions tab.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        # the CPU-only PyTorch build is much smaller than the default one with CUDA
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e . pytest pyflakes
+
+      - name: Lint
+        run: python -m pyflakes charlm tests
+
+      - name: Test
+        run: python -m pytest tests

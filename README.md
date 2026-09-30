@@ -1,5 +1,7 @@
 # Character-Level Transformer Language Model
 
+[![tests](https://github.com/Lior-Baruch/Char_Transformer_Language_Model/actions/workflows/tests.yml/badge.svg)](https://github.com/Lior-Baruch/Char_Transformer_Language_Model/actions/workflows/tests.yml)
+
 A small, readable PyTorch library for experimenting with the whole LLM training pipeline, one character at a time:
 
 ```
@@ -213,13 +215,14 @@ charlm/
   grpo.py         stage 3b
   cli.py          `python -m charlm ...`
 configs/          example configs for each stage
+.github/workflows/tests.yml   CI: lint and tests on pull requests and pushes to master
 checkpoints/example/   trained example models, their metrics and the DPO pairs
 data/input.txt    Tiny Shakespeare (1.1M characters)
 tests/            pytest suite, including a tiny end-to-end run of the pipeline
 char_transformer_language_model.ipynb   the original self-contained notebook walkthrough
 ```
 
-Run the tests with `pip install pytest && pytest tests`.
+Run the tests with `pip install pytest && pytest tests`. GitHub Actions also runs them, together with the `pyflakes` linter, on every pull request and every push to `master` (`.github/workflows/tests.yml`).
 
 ## The notebook
 
