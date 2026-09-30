@@ -169,6 +169,39 @@ def examples(results, per_task=2):
         print(f'| {e.prompt} | {cell(e.answer)} | ' + ' | '.join(marks) + ' |')
 
 
+def word_phrasings(label='SFT + reasoning', n=500):
+    """ word problems with held-out numbers, asked in the held-out phrasing and in a training phrasing: accuracy,
+    how often the equation the model writes first is right, and the accuracy per operation """
+    import random
+    import re
+    sys.path.insert(0, ROOT)
+    from charlm import TaskSuite, load_checkpoint, sample_replies, score
+    from charlm.reasoning import split_reply
+    from charlm.tasks import ITEMS, NAMES, WORD_TEMPLATES, Example
+    from charlm.tokenizer import THINK
+    path = dict(MODELS)[label]
+    model, tokenizer, _ = load_checkpoint(os.path.join(EXAMPLE, f'{path}.pt'))
+    suite = TaskSuite(open(os.path.join(ROOT, 'data', 'input.txt')).read())
+    held_out = suite.eval_set(n, ['word'])
+    rng = random.Random(0)
+    equation = lambda e: re.match(r'(\d+)([-+*/])(\d+)', e.reasoning).groups()
+    trained = [Example('word', rng.choice(WORD_TEMPLATES[op][:-1]).format(n=rng.choice(NAMES), i=rng.choice(ITEMS),
+                                                                         a=a, b=b), e.answer, e.reasoning)
+               for e in held_out for a, op, b in [equation(e)]]
+    print(f'\n{label}: word problems with held-out numbers')
+    print('| phrasing | accuracy | equation right | + | - | * | / |')
+    print('|---|---|---|---|---|---|---|')
+    for name, examples in [('held out (never trained on)', held_out), ('trained on', trained)]:
+        replies = [r[0][1] for r in sample_replies(model, tokenizer, [e.prompt for e in examples],
+                                                   max_new_tokens=MAX_NEW_TOKENS, temperature=0.0)]
+        right = [score(e, r) for e, r in zip(examples, replies)]
+        equations = [split_reply(r)[0].split(':')[0] == e.reasoning.split(':')[0] for e, r in zip(examples, replies)]
+        per_op = [[x for x, e in zip(right, examples) if equation(e)[1] == op] for op in '+-*/']
+        reasons = any(THINK in r for r in replies)
+        print(f"| {name} | {100 * sum(right) / n:.0f}% | {f'{100 * sum(equations) / n:.0f}%' if reasons else '-'} | "
+              + ' | '.join(f'{100 * sum(v) / len(v):.0f}%' for v in per_op) + ' |')
+
+
 def main():
     if sys.argv[1:2] == ['--only']:  # evaluate some models now, e.g. while another one is still training
         evaluate([m for m in MODELS if m[0] in sys.argv[2:]])
@@ -177,6 +210,7 @@ def main():
     results = evaluate()
     tables(results)
     examples(results)
+    word_phrasings()
     for theme_name, t in THEMES.items():
         save(sft_curves(t), 'reasoning_sft', theme_name)
         save(grpo_curves(t), 'reasoning_grpo', theme_name)
