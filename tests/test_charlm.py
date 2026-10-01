@@ -696,3 +696,20 @@ def test_word_problem_phrasings_can_be_split_between_stages():
     for bad in ([], [3], [0, 5]):
         with pytest.raises(ValueError, match='phrasings'):
             TaskSuite(text, phrasings=bad)
+
+
+def test_word_problems_can_be_evaluated_in_any_phrasing(tmp_path, capsys):
+    import re
+    from charlm.tasks import WORD_TEMPLATES
+    text = open(CORPUS).read()
+    pattern = lambda t: re.compile(re.sub(r'\\{[a-z]\\}', '.+', re.escape(t)) + '$')
+    default, second = TaskSuite(text).eval_set(30, ['word']), TaskSuite(text, eval_phrasing=2).eval_set(30, ['word'])
+    assert [e.answer for e in default] == [e.answer for e in second]  # the same held-out problems...
+    third = [pattern(ts[2]) for ts in WORD_TEMPLATES.values()]
+    assert all(any(p.match(e.prompt) for p in third) for e in second)  # ...asked in phrasing 2
+    with pytest.raises(ValueError, match='eval_phrasing'):
+        TaskSuite(text, eval_phrasing=4)
+    save_checkpoint(str(tmp_path / 'm.pt'), tiny_model(block_size=128), CharTokenizer())  # room for a word problem
+    cli_main(['eval', '--model', str(tmp_path / 'm.pt'), '--tasks', 'word', '--phrasing', '1', '--n-per-task', '2',
+              '--device', 'cpu', '--max-new-tokens', '4'])
+    assert 'word' in capsys.readouterr().out

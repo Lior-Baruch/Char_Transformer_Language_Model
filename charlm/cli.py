@@ -81,7 +81,7 @@ def run_chat(args):
 
 
 def run_eval(args):
-    suite = TaskSuite(load_text(args.corpus))
+    suite = TaskSuite(load_text(args.corpus), eval_phrasing=args.phrasing)
     examples = suite.eval_set(args.n_per_task, args.tasks)
     distinct = Counter(e.task for e in {(e.task, e.prompt): e for e in examples}.values())
     print(f"{args.n_per_task} held-out prompts per task (distinct: "
@@ -153,6 +153,8 @@ def main(argv=None):
     p.add_argument('--n-per-task', type=int, default=200)
     p.add_argument('--max-new-tokens', type=int, default=128, help='reply length limit (reasoning needs ~100)')
     p.add_argument('--show', type=int, default=0, help='print this many example replies per model')
+    p.add_argument('--phrasing', type=int, choices=range(4), default=None,
+                   help='ask word problems in this phrasing (0-2 are trained on; default: the held-out 3)')
     p.set_defaults(func=run_eval)
 
     p = sub.add_parser('make-sft-data', help='write synthetic task examples to a JSONL file')

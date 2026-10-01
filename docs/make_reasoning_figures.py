@@ -266,14 +266,14 @@ def word_phrasings(label='SFT + reasoning', quiet=False):
     return result
 
 
-SPLIT = [('SFT on phrasings 1-2', 'experiments/split_sft'), ('+ GRPO on phrasing 3', 'experiments/split_grpo'),
-         ('+ DPO on phrasing 3', 'experiments/split_dpo')]
+SPLIT = [('SFT on phrasings 0-1', 'experiments/split_sft'), ('+ GRPO on phrasing 2', 'experiments/split_grpo'),
+         ('+ DPO on phrasing 2', 'experiments/split_dpo')]
 
 
 def phrasing_split(label):
     """ the phrasing-split experiment (configs/reasoning/phrasing_split/): accuracy of a model on the evaluation's word
-    problems (held-out numbers) in the third training phrasing, which only GRPO and DPO practise, and in the held-out
-    fourth phrasing, which nothing trains on; plus its arithmetic, to check RL didn't break it """
+    problems (held-out numbers) in phrasing 2, which only GRPO and DPO practise, and in the held-out phrasing 3, which
+    nothing trains on; plus its arithmetic, to check RL didn't break it """
     def compute(label):
         import random
         from charlm import evaluate_tasks, load_checkpoint
@@ -286,8 +286,8 @@ def phrasing_split(label):
                                                               a=e.reasoning.split(op)[0], b=e.reasoning.split(op)[1]
                                                               .split(':')[0]), e.answer, e.reasoning)
                  for e in held_out for op in [op_of(e)]]
-        out = {'third phrasing': evaluate_tasks(model, tokenizer, third, MAX_NEW_TOKENS)['acc'],
-               'fourth phrasing': evaluate_tasks(model, tokenizer, held_out, MAX_NEW_TOKENS)['acc']}
+        out = {'phrasing 2': evaluate_tasks(model, tokenizer, third, MAX_NEW_TOKENS)['acc'],
+               'phrasing 3': evaluate_tasks(model, tokenizer, held_out, MAX_NEW_TOKENS)['acc']}
         arithmetic = evaluate_tasks(model, tokenizer, eval_examples(['add', 'sub', 'mul', 'div']), MAX_NEW_TOKENS)
         out.update({task: arithmetic[f'acc/{task}'] for task in ('add', 'sub', 'mul', 'div')})
         return out
@@ -459,6 +459,36 @@ def word_figure(t):
     return fig
 
 
+def split_figure(t):
+    """ the phrasing-split experiment: what GRPO and DPO practise gets better, what they don't gets worse """
+    results = [(label, phrasing_split(label)) for label, _ in SPLIT]
+    groups = [('phrasing 2', 'word problems, phrasing 2\n(GRPO and DPO practise it)'),
+              ('phrasing 3', 'word problems, phrasing 3\n(never trained on)'),
+              ('arithmetic', 'arithmetic\n(add, sub, mul, div)')]
+    fig, (ax,) = new_figure(t, 'GRPO and DPO get better at what they practise, and worse at what they don\'t',
+                            'The CPU reasoning model, 500 held-out problems per group. SFT trained on word-problem '
+                            'phrasings 0 and 1 only.', height=3.8, top=0.72)
+    fig.subplots_adjust(right=0.97, bottom=0.16)
+    legend(fig, t, [label for label, _ in results], y=0.85, kind='bar')
+    ax.set_xlim(-0.5, len(groups) - 0.5)
+    percent_axis(ax)
+    fig.canvas.draw()
+    inv = ax.transData.inverted()
+    px = inv.transform((1, 0))[0] - inv.transform((0, 0))[0]
+    bar, gap = 24 * px, 2 * px
+    total = len(results) * bar + (len(results) - 1) * gap
+    for g, (key, _) in enumerate(groups):
+        for m, ((_, r), color) in enumerate(zip(results, t['series'])):
+            value = 100 * (sum(r[k] for k in ('add', 'sub', 'mul', 'div')) / 4 if key == 'arithmetic' else r[key])
+            x0 = g - total / 2 + m * (bar + gap)
+            rounded_bar(ax, x0, bar, value, color)
+            ax.annotate(f'{value:.0f}', (x0 + bar / 2, value), xytext=(0, 3), textcoords='offset points',
+                        ha='center', va='bottom', color=t['ink2'], fontsize=8)  # no % sign: it would collide at 100
+    ax.set_xticks(range(len(groups)))
+    ax.set_xticklabels([name for _, name in groups])
+    return fig
+
+
 def main():
     if sys.argv[1:2] == ['--only']:  # evaluate some models now, e.g. while another one is still training
         evaluate([m for m in MODELS if m[0] in sys.argv[2:]])
@@ -479,6 +509,7 @@ def main():
         save(digits_figure(t), 'reasoning_digits', theme_name)
         save(cost_figure(t, results), 'reasoning_cost', theme_name)
         save(word_figure(t), 'reasoning_word', theme_name)
+        save(split_figure(t), 'reasoning_split', theme_name)
     print(f"wrote figures to {OUT}")
 
 

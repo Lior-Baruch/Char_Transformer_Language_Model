@@ -4,6 +4,7 @@
   "corpus_path": "data/input.txt",
   "tasks": ["reverse", "uppercase", "spell", "length", "add", "sub", "mul", "div", "word"],
   "reasoning": true,
+  "phrasings": [0, 1],
   "n_train": 200000,
   "n_val": 2000,
   "batch_size": 64,
