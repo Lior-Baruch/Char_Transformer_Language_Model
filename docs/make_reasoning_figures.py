@@ -266,6 +266,34 @@ def word_phrasings(label='SFT + reasoning', quiet=False):
     return result
 
 
+SPLIT = [('SFT on phrasings 1-2', 'experiments/split_sft'), ('+ GRPO on phrasing 3', 'experiments/split_grpo'),
+         ('+ DPO on phrasing 3', 'experiments/split_dpo')]
+
+
+def phrasing_split(label):
+    """ the phrasing-split experiment (configs/reasoning/phrasing_split/): accuracy of a model on the evaluation's word
+    problems (held-out numbers) in the third training phrasing, which only GRPO and DPO practise, and in the held-out
+    fourth phrasing, which nothing trains on; plus its arithmetic, to check RL didn't break it """
+    def compute(label):
+        import random
+        from charlm import evaluate_tasks, load_checkpoint
+        from charlm.tasks import ITEMS, NAMES, WORD_TEMPLATES, Example
+        model, tokenizer, _ = load_checkpoint(os.path.join(EXAMPLE, f'{dict(SPLIT)[label]}.pt'))
+        held_out = eval_examples(['word'])
+        rng = random.Random(0)
+        op_of = lambda e: e.reasoning.split(':')[0].strip('0123456789')
+        third = [Example('word', WORD_TEMPLATES[op][2].format(n=rng.choice(NAMES), i=rng.choice(ITEMS),
+                                                              a=e.reasoning.split(op)[0], b=e.reasoning.split(op)[1]
+                                                              .split(':')[0]), e.answer, e.reasoning)
+                 for e in held_out for op in [op_of(e)]]
+        out = {'third phrasing': evaluate_tasks(model, tokenizer, third, MAX_NEW_TOKENS)['acc'],
+               'fourth phrasing': evaluate_tasks(model, tokenizer, held_out, MAX_NEW_TOKENS)['acc']}
+        arithmetic = evaluate_tasks(model, tokenizer, eval_examples(['add', 'sub', 'mul', 'div']), MAX_NEW_TOKENS)
+        out.update({task: arithmetic[f'acc/{task}'] for task in ('add', 'sub', 'mul', 'div')})
+        return out
+    return cached('phrasing_split', label, compute)
+
+
 PLACES = ['ten-thousands', 'thousands', 'hundreds', 'tens', 'ones']
 SHORT_PLACES = {'ten-thousands': '10000s', 'thousands': '1000s', 'hundreds': '100s', 'tens': '10s', 'ones': '1s'}
 
