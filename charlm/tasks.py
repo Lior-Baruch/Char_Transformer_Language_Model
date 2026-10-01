@@ -99,12 +99,15 @@ class TaskSuite:
         if not 0 < eval_fraction < 1:
             raise ValueError(f"eval_fraction must be between 0 and 1, got {eval_fraction}")
         n_train_phrasings = len(next(iter(WORD_TEMPLATES.values()))) - 1
-        self.phrasings = list(range(n_train_phrasings)) if phrasings is None else list(phrasings)
-        if not self.phrasings or not set(self.phrasings) <= set(range(n_train_phrasings)):
-            raise ValueError(f"phrasings must be a non-empty list of 0..{n_train_phrasings - 1}, got {phrasings}")
+        is_index = lambda p, n: type(p) is int and 0 <= p < n  # True would mean phrasing 1; 1.0 fails as an index
+        self.phrasings = list(range(n_train_phrasings)) if phrasings is None else phrasings
+        if not isinstance(self.phrasings, (list, tuple)) or not self.phrasings or \
+                not all(is_index(p, n_train_phrasings) for p in self.phrasings):
+            raise ValueError(f"phrasings must be a non-empty list of 0..{n_train_phrasings - 1}, got {phrasings!r}")
+        self.phrasings = list(self.phrasings)
         self.eval_phrasing = n_train_phrasings if eval_phrasing is None else eval_phrasing
-        if self.eval_phrasing not in range(n_train_phrasings + 1):
-            raise ValueError(f"eval_phrasing must be 0..{n_train_phrasings}, got {eval_phrasing}")
+        if not is_index(self.eval_phrasing, n_train_phrasings + 1):
+            raise ValueError(f"eval_phrasing must be 0..{n_train_phrasings}, got {eval_phrasing!r}")
         self.split_seed, self.eval_fraction, self.max_operand = split_seed, eval_fraction, max_operand
         rng = random.Random(split_seed)
         words = sorted({w for w in re.findall(r"[a-z]+", text.lower()) if min_word_len <= len(w) <= max_word_len})

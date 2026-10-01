@@ -693,7 +693,7 @@ def test_word_problem_phrasings_can_be_split_between_stages():
         [e.prompt for e in TaskSuite(text, phrasings=[0, 1, 2]).sample(100, ['word'], seed=4)]
     assert [e.prompt for e in TaskSuite(text, phrasings=[0]).eval_set(20, ['word'])] == \
         [e.prompt for e in TaskSuite(text).eval_set(20, ['word'])]
-    for bad in ([], [3], [0, 5]):
+    for bad in ([], [3], [0, 5], [1.0], [True], 2, '01'):  # True would pick phrasing 1, 1.0 can't index
         with pytest.raises(ValueError, match='phrasings'):
             TaskSuite(text, phrasings=bad)
 
@@ -707,9 +707,13 @@ def test_word_problems_can_be_evaluated_in_any_phrasing(tmp_path, capsys):
     assert [e.answer for e in default] == [e.answer for e in second]  # the same held-out problems...
     third = [pattern(ts[2]) for ts in WORD_TEMPLATES.values()]
     assert all(any(p.match(e.prompt) for p in third) for e in second)  # ...asked in phrasing 2
-    with pytest.raises(ValueError, match='eval_phrasing'):
-        TaskSuite(text, eval_phrasing=4)
+    for bad in (4, -1, 2.0, True):
+        with pytest.raises(ValueError, match='eval_phrasing'):
+            TaskSuite(text, eval_phrasing=bad)
+    # the CLI asks the same problems in the phrasing it is given
     save_checkpoint(str(tmp_path / 'm.pt'), tiny_model(block_size=128), CharTokenizer())  # room for a word problem
     cli_main(['eval', '--model', str(tmp_path / 'm.pt'), '--tasks', 'word', '--phrasing', '1', '--n-per-task', '2',
-              '--device', 'cpu', '--max-new-tokens', '4'])
-    assert 'word' in capsys.readouterr().out
+              '--device', 'cpu', '--max-new-tokens', '4', '--show', '1'])
+    out = capsys.readouterr().out
+    first = TaskSuite(text, eval_phrasing=1).eval_set(2, ['word'])[0]
+    assert repr(first.prompt) in out and repr(TaskSuite(text).eval_set(2, ['word'])[0].prompt) not in out
