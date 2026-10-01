@@ -60,7 +60,14 @@ python -m charlm dpo      --config configs/example/dpo.json
 python -m charlm grpo     --config configs/example/grpo.json
 ```
 
-These configs write to `checkpoints/example/`, so they replace the models that come with the repository (`git checkout checkpoints/example` restores them). To keep those, add `--set out_path=runs/base.pt` to each command and point the next stage at it with `init_from=runs/base.pt`, or copy the configs and change their paths.
+These configs write to `checkpoints/example/`, so they replace the models that come with the repository (`git checkout checkpoints/example` restores them). To keep those, give each stage its own output file and point the next stages at it:
+
+```bash
+python -m charlm pretrain --config configs/example/pretrain.json --set out_path=runs/base.pt
+python -m charlm sft      --config configs/example/sft.json  --set init_from=runs/base.pt out_path=runs/sft.pt
+python -m charlm dpo      --config configs/example/dpo.json  --set init_from=runs/sft.pt out_path=runs/dpo.pt
+python -m charlm grpo     --config configs/example/grpo.json --set init_from=runs/sft.pt out_path=runs/grpo.pt
+```
 
 Any config option can be overridden from the command line, which makes quick experiments easy:
 
@@ -200,7 +207,7 @@ GRPO raises addition from 13% to 24% without hurting the other tasks. Over train
 </picture>
 
 Three choices mattered:
-- **It trains on addition only** (`"tasks": ["add"]`). The word tasks are already solved, so every reply in their groups gets the same reward and carries no learning signal. Trained on all tasks, only ~10% of groups had any signal, and addition didn't move (13.0%).
+- **It trains on addition only** (`"tasks": ["add"]`). The word tasks are already solved, so every reply in their groups gets the same reward, and the only thing that acts on them is the KL penalty. Trained on all tasks, only ~10% of groups had any reward signal, and addition didn't move (13.0%).
 - **Groups of 16 replies.** With this group size, ~70% of addition groups contain both right and wrong answers.
 - **A gentle update.** A higher learning rate (3e-4) with a weaker KL penalty (0.01) was unstable: the KL to the reference jumped past 0.8 and the reward fell.
 
@@ -220,7 +227,7 @@ saved model to checkpoints/example/grpo.pt
 
 - `reward`: the share of sampled replies that were correct in this step's groups.
 - `kl`: how far the model has moved from the SFT model, per token.
-- `groups_with_signal`: the share of groups with both right and wrong replies. Only those groups teach the model anything.
+- `groups_with_signal`: the share of groups with both right and wrong replies. Only those have a reward signal; the KL penalty acts on every group, but it only pulls the model back toward the SFT model.
 - `acc/...`: greedy accuracy on held-out prompts, measured every 25 steps.
 
 </details>
@@ -329,7 +336,7 @@ The equation column checks the equation the model writes first (like `12/3:`) by
 
 With the new phrasing, the model mostly writes the wrong equation first. It reads "There are 7 marbles and 8 more arrive" as `87+8`, and "Adam puts 20 stickers into 5 equal groups" as `20+5`. Three phrasings per operation are not enough for a character-level model to learn what the words mean. More phrasings, or a bigger model pretrained on more English (like the [Colab model](#a-bigger-model-on-a-gpu-colab)), are the natural next experiments.
 
-**GRPO has little left to teach, but it helps with the new phrasing.** The reasoning model already gets 99% of its sampled training replies right, so only ~5% of the groups contain both a right and a wrong reply, and only those carry a learning signal. The arithmetic stays at 99-100%. Still, held-out word problems rise from 22% to 34%, although GRPO trains only on the three training phrasings. The gains have different causes. Multiplication stories go from 1% to 22% because the model now reads them right: its first equation is right 22% of the time instead of 1%. Addition stories go from 25% to 45% although the model writes the right equation just as often (50% before, 49% after): it now finishes the sum it wrote more often. The plain model's GRPO run goes nowhere: its reward stays near 20%, and no task's held-out accuracy moves by more than 4 points. GRPO took 5 minutes for the plain model and 13 for the reasoning one.
+**GRPO has little left to teach, but it helps with the new phrasing.** The reasoning model already gets 99% of its sampled training replies right, so only ~5% of the groups contain both a right and a wrong reply, and only those carry a reward signal (the KL penalty acts on all of them, but it only pulls the model back toward the SFT model). The arithmetic stays at 99-100%. Still, held-out word problems rise from 22% to 34%, although GRPO trains only on the three training phrasings. The gains have different causes. Multiplication stories go from 1% to 22% because the model now reads them right: its first equation is right 22% of the time instead of 1%. Addition stories go from 25% to 45% although the model writes the right equation just as often (50% before, 49% after): it now finishes the sum it wrote more often. The plain model's GRPO run goes nowhere: its reward stays near 20%, and no task's held-out accuracy moves by more than 4 points. GRPO took 5 minutes for the plain model and 13 for the reasoning one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_grpo_dark.png">
@@ -474,7 +481,7 @@ loss = -log sigmoid(beta * ((log π(chosen) - log π_ref(chosen)) - (log π(reje
 
 1. Sample `batch_size` training prompts from `tasks` and `group_size` replies to each, at temperature 1.
 2. Reward each reply: 1 if it is correct, 0 if not.
-3. Compute each reply's advantage relative to its own group: `(reward - group mean) / group std`. If a group's replies are all right or all wrong, they carry no signal.
+3. Compute each reply's advantage relative to its own group: `(reward - group mean) / group std`. If a group's replies are all right or all wrong, their advantages are all 0: they carry no reward signal, and only the KL penalty below acts on them.
 4. Update the model with the PPO clipped objective on the reply tokens, plus a KL penalty (k3 estimator) that keeps it close to the reference model:
 
 ```

@@ -85,8 +85,8 @@ def grpo_curves(t):
     runs = [('SFT + GRPO', read_metrics('experiments/grpo_plain.metrics.jsonl')),
             ('SFT + reasoning + GRPO', read_metrics('grpo_reasoning.metrics.jsonl'))]
     fig, axes = new_figure(t, 'GRPO on the math tasks, with and without reasoning',
-                           'Training reward, groups with both right and wrong replies (the only ones that teach '
-                           'anything), and held-out word problems.', ncols=3, height=3.4,
+                           'Training reward, groups with both right and wrong replies (the only ones with a reward '
+                           'signal), and held-out word problems.', ncols=3, height=3.4,
                            top=0.64, wspace=0.45)
     fig.subplots_adjust(right=0.93)
     legend(fig, t, [show(name) for name, _ in runs], y=0.8)
@@ -98,16 +98,15 @@ def grpo_curves(t):
         x, acc = column(rows, 'acc/word', 100)
         line(axes[2], t, x, acc, color, f'{acc[-1]:.0f}%')
     panel_title(axes[0], t, 'reward (correct sampled replies)')
-    panel_title(axes[1], t, 'groups with a learning signal')
+    panel_title(axes[1], t, 'groups with a reward signal')
     panel_title(axes[2], t, 'word problems, new phrasing')
-    for ax in axes:
-        ax.set_xlim(-15, 315)
-        ax.set_xticks([0, 100, 200, 300])
-        if ax is not axes[0]:
-            ax.set_yticklabels([])  # the three panels share the 0-100% scale
     for ax in axes:
         percent_axis(ax)
         axis_label(ax, t, x='GRPO step')
+        ax.set_xlim(-15, 315)
+        ax.set_xticks([0, 100, 200, 300])
+        if ax is not axes[0]:
+            ax.set_yticklabels([])  # after percent_axis, which sets them: the three panels share the 0-100% scale
     return fig
 
 
