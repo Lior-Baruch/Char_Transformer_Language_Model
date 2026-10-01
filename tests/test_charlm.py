@@ -676,3 +676,44 @@ def test_memory_settings_may_change_on_resume_and_cut_off_metric_rows_are_droppe
     path.write_text('{"step": 0, "acc": 0.1}\n{"step": 5, "acc": 0.2}\n{"step": 10, "ac')
     MetricsLogger(str(path), append=True, keep_until=5).log(10, acc=0.3)
     assert [json.loads(line)['step'] for line in open(path)] == [0, 5, 10]
+
+
+def test_word_problem_phrasings_can_be_split_between_stages():
+    import re
+    from charlm.tasks import WORD_TEMPLATES
+    text = open(CORPUS).read()
+    pattern = lambda t: re.compile(re.sub(r'\\{[a-z]\\}', '.+', re.escape(t)) + '$')
+    third = [pattern(ts[2]) for ts in WORD_TEMPLATES.values()]
+    others = [pattern(t) for ts in WORD_TEMPLATES.values() for t in ts[:2]]
+    train = TaskSuite(text, phrasings=[2]).sample(200, ['word'], 'train', seed=3)
+    assert all(any(p.match(e.prompt) for p in third) for e in train)
+    assert not any(p.match(e.prompt) for p in others for e in train)
+    # the default uses all three training phrasings, and evaluation never depends on the choice
+    assert [e.prompt for e in TaskSuite(text).sample(100, ['word'], seed=4)] == \
+        [e.prompt for e in TaskSuite(text, phrasings=[0, 1, 2]).sample(100, ['word'], seed=4)]
+    assert [e.prompt for e in TaskSuite(text, phrasings=[0]).eval_set(20, ['word'])] == \
+        [e.prompt for e in TaskSuite(text).eval_set(20, ['word'])]
+    for bad in ([], [3], [0, 5], [1.0], [True], 2, '01'):  # True would pick phrasing 1, 1.0 can't index
+        with pytest.raises(ValueError, match='phrasings'):
+            TaskSuite(text, phrasings=bad)
+
+
+def test_word_problems_can_be_evaluated_in_any_phrasing(tmp_path, capsys):
+    import re
+    from charlm.tasks import WORD_TEMPLATES
+    text = open(CORPUS).read()
+    pattern = lambda t: re.compile(re.sub(r'\\{[a-z]\\}', '.+', re.escape(t)) + '$')
+    default, second = TaskSuite(text).eval_set(30, ['word']), TaskSuite(text, eval_phrasing=2).eval_set(30, ['word'])
+    assert [e.answer for e in default] == [e.answer for e in second]  # the same held-out problems...
+    third = [pattern(ts[2]) for ts in WORD_TEMPLATES.values()]
+    assert all(any(p.match(e.prompt) for p in third) for e in second)  # ...asked in phrasing 2
+    for bad in (4, -1, 2.0, True):
+        with pytest.raises(ValueError, match='eval_phrasing'):
+            TaskSuite(text, eval_phrasing=bad)
+    # the CLI asks the same problems in the phrasing it is given
+    save_checkpoint(str(tmp_path / 'm.pt'), tiny_model(block_size=128), CharTokenizer())  # room for a word problem
+    cli_main(['eval', '--model', str(tmp_path / 'm.pt'), '--tasks', 'word', '--phrasing', '1', '--n-per-task', '2',
+              '--device', 'cpu', '--max-new-tokens', '4', '--show', '1'])
+    out = capsys.readouterr().out
+    first = TaskSuite(text, eval_phrasing=1).eval_set(2, ['word'])[0]
+    assert repr(first.prompt) in out and repr(TaskSuite(text).eval_set(2, ['word'])[0].prompt) not in out

@@ -91,9 +91,23 @@ class TaskSuite:
     """ generates task examples; the train/eval split is fixed by split_seed """
 
     def __init__(self, text, split_seed=0, eval_fraction=0.2, min_word_len=3, max_word_len=12, max_number=99,
-                 max_operand=999):
+                 max_operand=999, phrasings=None, eval_phrasing=None):
+        """ phrasings: which of the training phrasings of word problems (0, 1, 2) the train split uses; None = all
+        three. E.g. SFT on [0, 1] and RL on [2] gives RL a phrasing the SFT model never saw.
+        eval_phrasing: the phrasing (0-3) of the eval split's word problems; None = the held-out phrasing 3. Another
+        value measures a training phrasing on held-out numbers """
         if not 0 < eval_fraction < 1:
             raise ValueError(f"eval_fraction must be between 0 and 1, got {eval_fraction}")
+        n_train_phrasings = len(next(iter(WORD_TEMPLATES.values()))) - 1
+        is_index = lambda p, n: type(p) is int and 0 <= p < n  # True would mean phrasing 1; 1.0 fails as an index
+        self.phrasings = list(range(n_train_phrasings)) if phrasings is None else phrasings
+        if not isinstance(self.phrasings, (list, tuple)) or not self.phrasings or \
+                not all(is_index(p, n_train_phrasings) for p in self.phrasings):
+            raise ValueError(f"phrasings must be a non-empty list of 0..{n_train_phrasings - 1}, got {phrasings!r}")
+        self.phrasings = list(self.phrasings)
+        self.eval_phrasing = n_train_phrasings if eval_phrasing is None else eval_phrasing
+        if not is_index(self.eval_phrasing, n_train_phrasings + 1):
+            raise ValueError(f"eval_phrasing must be 0..{n_train_phrasings}, got {eval_phrasing!r}")
         self.split_seed, self.eval_fraction, self.max_operand = split_seed, eval_fraction, max_operand
         rng = random.Random(split_seed)
         words = sorted({w for w in re.findall(r"[a-z]+", text.lower()) if min_word_len <= len(w) <= max_word_len})
@@ -179,7 +193,7 @@ class TaskSuite:
     def _word_problem(self, rng, split):
         op = rng.choice('+-*/')
         templates = WORD_TEMPLATES[op]
-        template = templates[-1] if split == 'eval' else rng.choice(templates[:-1])
+        template = templates[self.eval_phrasing] if split == 'eval' else templates[rng.choice(self.phrasings)]
 
         def draw():  # small numbers keep the prompt, the trace and the answer within a 128-character context
             if op == '+':

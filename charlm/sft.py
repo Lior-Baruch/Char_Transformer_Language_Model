@@ -34,6 +34,9 @@ class SFTConfig(TrainConfig):
     corpus_path: str = "data/input.txt"  # text the synthetic tasks are built from
     tasks: List[str] = field(default_factory=lambda: list(ALL_TASKS))
     reasoning: bool = False  # math tasks reply with a <|think|> scratchpad before the answer
+    # which training phrasings of word problems to train on (0, 1, 2; None = all three); evaluation always uses the
+    # held-out fourth one
+    phrasings: Optional[List[int]] = None
     n_train: int = 20000  # number of synthetic training examples
     n_val: int = 1000  # number of synthetic held-out examples for the val loss
     val_fraction: float = 0.05  # part of data_path held out for the val loss
@@ -102,7 +105,7 @@ def sft(cfg):
         return done
     check_init_from(cfg.init_from)
     model, tokenizer, _ = load_checkpoint(cfg.init_from, device, dropout=cfg.dropout)
-    suite = TaskSuite(load_text(cfg.corpus_path))
+    suite = TaskSuite(load_text(cfg.corpus_path), phrasings=cfg.phrasings)
     train_pairs, val_pairs = load_sft_data(cfg, suite)
     if cfg.reasoning or any(t in r for _, r in train_pairs + val_pairs for t in REASONING_TOKENS):
         add_reasoning_tokens(model, tokenizer)

@@ -91,18 +91,45 @@ Training uses the GPU automatically when there is one (`device` defaults to `aut
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Lior-Baruch/Char_Transformer_Language_Model/blob/master/notebooks/colab_pipeline.ipynb)
 
-`notebooks/colab_pipeline.ipynb` runs the pipeline on a Colab GPU with the configs in `configs/colab/`:
+`notebooks/colab_pipeline.ipynb` runs the pipeline on a Colab GPU with the configs in `configs/colab/`. "Run all" trains every stage; `TRAIN_GRPO` and `TRAIN_DPO` in the first cell switch those two off.
 
-| stage | what it does | rough time on an A100 |
+| stage | what it does | time in one run |
 |---|---|---|
-| data | download TinyStories and keep the first billion characters | ~5 min |
-| pretrain | 59M parameters (12 layers, 640-dim, 10 heads, 512-character context), 60,000 steps of 64 x 512 characters | ~2 h |
-| SFT | all nine checkable tasks, with reasoning | ~20 min |
-| GRPO | the five math tasks, 32 prompts x 16 replies per step | ~30 min |
+| data | download TinyStories and keep the first billion characters | 3 min |
+| pretrain | 59M parameters (12 layers, 640-dim, 10 heads, 512-character context), 60,000 steps of 64 x 512 characters | 1 h 52 min |
+| SFT | all nine checkable tasks with reasoning; word problems in phrasings 0 and 1 | 5 min (early stopping) |
+| GRPO | word problems in phrasing 2, which SFT never saw: 32 prompts x 16 replies per step, 150 steps | ~10-15 min (estimate) |
+| DPO | the same problems, from pairs of the correct reasoning and the model's own wrong replies, 150 steps | ~10-15 min (estimate) |
 
-A last, optional cell runs DPO instead of GRPO (`configs/colab/dpo.json`), on pairs of the correct reasoning and one of the model's own wrong replies.
+GRPO and DPO each start from the SFT model; they are two alternative ways to improve it. They were changed after the run below, so their times are estimates. An L4 is roughly three times slower, so the notebook has a `MAX_ITERS` setting to shorten pretraining. Training runs in bf16 (`"precision": "auto"`). Data and checkpoints are kept on Google Drive. If Colab disconnects, run all the cells again: finished stages are skipped and the interrupted one resumes from its last saved state.
 
-The times are estimates: this repository's own runs are on a CPU. An L4 is roughly three times slower, so the notebook has a `MAX_ITERS` setting to shorten pretraining. Training runs in bf16 (`"precision": "auto"`). Data and checkpoints are kept on Google Drive. If Colab disconnects, run all the cells again: finished stages are skipped and the interrupted one resumes from its last saved state.
+### Results of a Colab run
+
+**Pretraining** ran all 60,000 steps in 1 h 52 min. The validation loss fell to 0.348 nats per character and was still falling at the end, so a longer run would help. Training and validation loss stay together: unlike Tiny Shakespeare, a billion characters is too much to memorize.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/colab_pretraining_dark.png">
+  <img alt="Line chart of training and validation loss over 60,000 pretraining steps of the 59M model. Both fall from 0.76 at step 1,000 to about 0.35 at step 60,000 and stay close together; the final validation loss is 0.348." src="docs/figures/colab_pretraining.png">
+</picture>
+
+**Fine-tuning** used the configs of the time: SFT on all three training phrasings, then GRPO for 500 steps and DPO for 1,000 steps on all five math tasks. Accuracy on 100 held-out prompts per task:
+
+| model | reverse | uppercase | spell | length | add | sub | mul | div | word | overall |
+|---|---|---|---|---|---|---|---|---|---|---|
+| SFT with reasoning (step 3,500, kept) | 98% | 99% | 99% | 100% | 99% | 97% | 97% | 99% | **48%** | **92.9%** |
+| + GRPO | 95% | 100% | 100% | 100% | 100% | 100% | 100% | 100% | 22% | 90.8% |
+| + DPO | 93% | 100% | 98% | 100% | 88% | 90% | 80% | 77% | 31% | 84.1% |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/colab_finetuning_dark.png">
+  <img alt="Three line charts of held-out accuracy during fine-tuning of the 59M model. SFT: arithmetic rises to 98-100% and word problems in the never-trained phrasing to about 48%; the checkpoint from step 3,500 is kept. GRPO: arithmetic stays at 98-100%, word problems fall from 50% to 23% between steps 100 and 150 and stay there. DPO: arithmetic falls from 98% to 84% and word problems from 48% to 31% over 1,000 steps." src="docs/figures/colab_finetuning.png">
+</picture>
+
+- **SFT works.** Besides 97-99% on arithmetic, it gets 48% of the word problems in the phrasing it never saw, against 22% for the 1.8M-parameter CPU model (measured on 100 and 500 prompts). A model pretrained on a billion characters of English reads unfamiliar wording better.
+- **GRPO made it worse.** It brought arithmetic to 100%, but word problems in the never-trained phrasing fell from 50% to 23% between steps 100 and 150 and stayed there. The model already got 99% of its sampled training replies right, so only 1-6% of the groups carried a reward signal: there was almost nothing to learn, and nothing kept the unfamiliar phrasing in place.
+- **DPO made it worse too:** division 99% → 77%, multiplication 97% → 80%, word problems 48% → 31%, although its training metrics looked healthy (it told chosen from rejected replies apart perfectly). A wrong reply differs from the right one in a digit or two of a ~55-token scratchpad, so pushing it down also pushes down the steps they share; and an accurate model makes few mistakes to pair, so the same pairs were probably seen many times.
+
+After this run, the configs were changed to give GRPO and DPO problems the model actually gets wrong, and to run them for 150 steps instead of 500 and 1,000 (see [Giving GRPO and DPO something to learn](#giving-grpo-and-dpo-something-to-learn)). The new configs haven't been run on a GPU yet. To run them on a Drive that holds an earlier run, first delete `sft.*`, `grpo.*` and `dpo.*` in `MyDrive/charlm/checkpoints` (keep `base.*`); otherwise SFT stops with "finished by a run with different settings". The logs of this run are in `docs/colab_run/`, and `docs/make_colab_figures.py` draws the figures.
 
 ## More training data
 
@@ -138,7 +165,7 @@ python -m charlm eval --model checkpoints/example/base.pt checkpoints/example/sf
   <img alt="Grouped bar chart of held-out accuracy per task for the SFT, DPO and GRPO models. All three are near 100% on reverse, uppercase, spell and length. On addition SFT scores 13%, DPO 20% and GRPO 24%." src="docs/figures/final_comparison.png">
 </picture>
 
-The accuracy curves below (SFT, DPO and GRPO) are measured during training on 100 held-out prompts per task (50 for SFT), so they are noisier than the 500-prompt table. The figures are drawn by `docs/make_figures.py`, `docs/make_reasoning_figures.py` and `docs/make_diagrams.py`, and the example tables printed by `docs/make_examples.py`, from the files in `checkpoints/example/` (`pip install matplotlib`, then e.g. `python docs/make_figures.py`).
+The accuracy curves below (SFT, DPO and GRPO) are measured during training on 100 held-out prompts per task (50 for SFT), so they are noisier than the 500-prompt table. The figures are drawn by `docs/make_figures.py`, `docs/make_reasoning_figures.py` and `docs/make_diagrams.py`, and the example tables printed by `docs/make_examples.py`, from the files in `checkpoints/example/` (the Colab figures by `docs/make_colab_figures.py`, from `docs/colab_run/`; `pip install matplotlib`, then e.g. `python docs/make_figures.py`).
 
 ### Pretraining
 
@@ -362,6 +389,21 @@ The last one shows the word-problem failure: in the unfamiliar phrasing, the mod
 
 The plain models are not in the repository, only their metrics (`checkpoints/example/experiments/`); `docs/make_reasoning_figures.py` makes the figures and tables from them.
 
+### Giving GRPO and DPO something to learn
+
+The reasoning model's GRPO runs above, on the CPU and on Colab, had little to learn: the SFT models already got 98-99% of their training problems right. Larger numbers don't help either. The reasoning model never writes more scratchpad steps than it was trained on, so none of 1,440 sampled replies was right when a subtraction or multiplication had a 4-digit number or a division a 4-digit answer, and a group that is all wrong carries no reward signal. A phrasing the model hasn't seen does work. In this experiment SFT trains on word-problem phrasings 0 and 1 only (`"phrasings": [0, 1]`), then GRPO and DPO practise phrasing 2 (`"tasks": ["word"], "phrasings": [2]`), and phrasing 3 stays held out:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_split_dark.png">
+  <img alt="Grouped bar chart for three CPU models on 500 held-out problems per task (the arithmetic bars average add, sub, mul and div). Word problems in phrasing 2, which GRPO and DPO practise: SFT 31%, after GRPO 98%, after DPO 95%. Word problems in phrasing 3, never trained on: SFT 49%, after GRPO 33%, after DPO 23%. Arithmetic: 100%, 100% and 97%." src="docs/figures/reasoning_split.png">
+</picture>
+
+- **GRPO learns the new phrasing from rewards alone:** 31% → 98% on held-out numbers, with the arithmetic untouched. Its reward rose from 80% (averaged over the first 25 steps) to 98% by step 50.
+- **The phrasing nothing trained on gets worse:** 49% → 33%. GRPO gets better at what it practises, not at reading wording in general. (The first reasoning model's GRPO run improved the held-out phrasing instead, 22% → 34%; it started from SFT on all three training phrasings and practised all five math tasks, so the two runs don't show which outcome is typical.)
+- **DPO also learns phrasing 2** (95%), but costs some arithmetic (addition 100% → 92%, division 99% → 94%) and more of phrasing 3 (23%).
+
+`configs/reasoning/phrasing_split/` reproduces the experiment (its models are not in the repository, only their metrics), and `--phrasing` asks the held-out word problems in a given phrasing, e.g. `python -m charlm eval --model checkpoints/example/sft_reasoning.pt --tasks word --phrasing 2`. The Colab configs now use the same split.
+
 ## Using it as a library
 
 ```python
@@ -437,7 +479,7 @@ The instruction data is generated from the corpus. Every task except `speak` has
 
 Because the answers can be checked, the same tasks give labeled data for SFT, correct/wrong pairs for DPO and a reward for GRPO.
 
-The first five tasks are the defaults. `sub`, `mul`, `div` and `word` are used when a config lists them in `tasks`. Words are 3 to 12 letters long and `add` uses numbers up to 99. `sub` uses numbers up to 999 (never below zero), `mul` multiplies a number up to 999 by one digit, and `div` divides by one digit with no remainder. Word problems use one operation on small numbers, in four phrasings per operation.
+The first five tasks are the defaults. `sub`, `mul`, `div` and `word` are used when a config lists them in `tasks`. Words are 3 to 12 letters long and `add` uses numbers up to 99. `sub` uses numbers up to 999 (never below zero), `mul` multiplies a number up to 999 by one digit, and `div` divides by one digit with no remainder. Word problems use one operation on small numbers, in four phrasings per operation, numbered 0-3. Phrasing 3 is only used for evaluation; a config's `phrasings` option picks which of 0-2 a stage trains on (all three by default), and `eval --phrasing N` asks the held-out problems in phrasing N.
 
 20% of the words, number problems and speeches are held out, and so is one phrasing of each word problem. All accuracy numbers are measured on those held-out prompts, so they show whether the model learned the task rather than memorized the training examples (or, for word problems, the phrasing).
 
@@ -519,7 +561,7 @@ charlm/
   cli.py          `python -m charlm ...`
 configs/
   example/        the example models (CPU)
-  reasoning/      SFT and GRPO with and without reasoning (CPU)
+  reasoning/      SFT and GRPO with and without reasoning, and the phrasing-split experiment (CPU)
   colab/          the 59M-parameter pipeline (GPU)
 notebooks/colab_pipeline.ipynb   the GPU pipeline on Colab
 .github/workflows/tests.yml   CI: lint and tests on pull requests and pushes to master
@@ -527,7 +569,8 @@ notebooks/colab_pipeline.ipynb   the GPU pipeline on Colab
 checkpoints/example/   trained example models, their metrics and the DPO pairs
   experiments/  metrics of the variants and comparison runs
 docs/             README figures and the scripts that make them (make_figures.py, make_examples.py,
-                  make_reasoning_figures.py, make_diagrams.py)
+                  make_reasoning_figures.py, make_diagrams.py, make_colab_figures.py)
+  colab_run/      the training logs of the Colab run
 data/input.txt    Tiny Shakespeare (1.1M characters)
 tests/            pytest suite, including a tiny end-to-end run of the pipeline
 char_transformer_language_model.ipynb   the original self-contained notebook walkthrough
