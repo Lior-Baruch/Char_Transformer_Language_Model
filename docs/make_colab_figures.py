@@ -37,7 +37,7 @@ def pretraining(t):
     legend(fig, t, ['training loss', 'validation loss'], y=0.83)
     x, train = column(rows, 'train_loss')
     _, val = column(rows, 'val_loss')
-    line(ax, t, x, train, t['series'][0])  # the two curves end almost together: only the held-out one is labelled
+    line(ax, t, x, train, t['series'][0], dot=False)  # the curves end almost together: only val is marked
     line(ax, t, x, val, t['series'][1], f'val {val[-1]:.3f}')
     ax.set_ylim(0.3, 0.8)
     thousands(ax)

@@ -122,11 +122,11 @@ GRPO and DPO each start from the SFT model; they are two alternative ways to imp
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/colab_finetuning_dark.png">
-  <img alt="Three line charts of held-out accuracy during fine-tuning of the 59M model. SFT: arithmetic rises to 98-100% and word problems in the never-trained phrasing to about 48%; the checkpoint from step 3,500 is kept. GRPO: arithmetic stays at 98-100%, word problems fall from 51% to 23% between steps 100 and 150 and stay there. DPO: arithmetic falls from 98% to 84% and word problems from 48% to 31% over 1,000 steps." src="docs/figures/colab_finetuning.png">
+  <img alt="Three line charts of held-out accuracy during fine-tuning of the 59M model. SFT: arithmetic rises to 98-100% and word problems in the never-trained phrasing to about 48%; the checkpoint from step 3,500 is kept. GRPO: arithmetic stays at 98-100%, word problems fall from 50% to 23% between steps 100 and 150 and stay there. DPO: arithmetic falls from 98% to 84% and word problems from 48% to 31% over 1,000 steps." src="docs/figures/colab_finetuning.png">
 </picture>
 
 - **SFT works.** Besides 97-99% on arithmetic, it gets 48% of the word problems in the phrasing it never saw, against 22% for the 1.8M-parameter CPU model (measured on 100 and 500 prompts). A model pretrained on a billion characters of English reads unfamiliar wording better.
-- **GRPO made it worse.** It brought arithmetic to 100%, but word problems in the never-trained phrasing fell from 51% to 23% between steps 100 and 150 and stayed there. The model already got 99% of its sampled training replies right, so only 1-6% of the groups carried a reward signal: there was almost nothing to learn, and nothing kept the unfamiliar phrasing in place.
+- **GRPO made it worse.** It brought arithmetic to 100%, but word problems in the never-trained phrasing fell from 50% to 23% between steps 100 and 150 and stayed there. The model already got 99% of its sampled training replies right, so only 1-6% of the groups carried a reward signal: there was almost nothing to learn, and nothing kept the unfamiliar phrasing in place.
 - **DPO made it worse too:** division 99% → 77%, multiplication 97% → 80%, word problems 48% → 31%, although its training metrics looked healthy (it told chosen from rejected replies apart perfectly). A wrong reply differs from the right one in a digit or two of a ~55-token scratchpad, so pushing it down also pushes down the steps they share; and an accurate model makes few mistakes to pair, so the same pairs were probably seen many times.
 
 After this run, the configs were changed to give GRPO and DPO problems the model actually gets wrong, and to run them for 150 steps instead of 500 and 1,000 (see [Giving GRPO and DPO something to learn](#giving-grpo-and-dpo-something-to-learn)). The new configs haven't been run on a GPU yet. To run them on a Drive that holds an earlier run, first delete `sft.*`, `grpo.*` and `dpo.*` in `MyDrive/charlm/checkpoints` (keep `base.*`); otherwise SFT stops with "finished by a run with different settings". The logs of this run are in `docs/colab_run/`, and `docs/make_colab_figures.py` draws the figures.
@@ -165,7 +165,7 @@ python -m charlm eval --model checkpoints/example/base.pt checkpoints/example/sf
   <img alt="Grouped bar chart of held-out accuracy per task for the SFT, DPO and GRPO models. All three are near 100% on reverse, uppercase, spell and length. On addition SFT scores 13%, DPO 20% and GRPO 24%." src="docs/figures/final_comparison.png">
 </picture>
 
-The accuracy curves below (SFT, DPO and GRPO) are measured during training on 100 held-out prompts per task (50 for SFT), so they are noisier than the 500-prompt table. The figures are drawn by `docs/make_figures.py`, `docs/make_reasoning_figures.py`, `docs/make_colab_figures.py` and `docs/make_diagrams.py`, and the example tables printed by `docs/make_examples.py`, from the files in `checkpoints/example/` (`pip install matplotlib`, then e.g. `python docs/make_figures.py`).
+The accuracy curves below (SFT, DPO and GRPO) are measured during training on 100 held-out prompts per task (50 for SFT), so they are noisier than the 500-prompt table. The figures are drawn by `docs/make_figures.py`, `docs/make_reasoning_figures.py` and `docs/make_diagrams.py`, and the example tables printed by `docs/make_examples.py`, from the files in `checkpoints/example/` (the Colab figures by `docs/make_colab_figures.py`, from `docs/colab_run/`; `pip install matplotlib`, then e.g. `python docs/make_figures.py`).
 
 ### Pretraining
 
@@ -391,18 +391,18 @@ The plain models are not in the repository, only their metrics (`checkpoints/exa
 
 ### Giving GRPO and DPO something to learn
 
-Both GRPO runs above had little to learn: the SFT models already got 98-99% of their training problems right. Larger numbers don't help either. The reasoning model never extends its scratchpad to a fourth digit, so none of 1,440 sampled replies to 4-digit problems was right, and a group that is all wrong carries no reward signal. A phrasing the model hasn't seen does work. In this experiment SFT trains on word-problem phrasings 0 and 1 only (`"phrasings": [0, 1]`), then GRPO and DPO practise phrasing 2 (`"tasks": ["word"], "phrasings": [2]`), and phrasing 3 stays held out:
+The reasoning model's GRPO runs above, on the CPU and on Colab, had little to learn: the SFT models already got 98-99% of their training problems right. Larger numbers don't help either. The reasoning model never writes more scratchpad steps than it was trained on, so none of 1,440 sampled replies was right when a subtraction or multiplication had a 4-digit number or a division a 4-digit answer, and a group that is all wrong carries no reward signal. A phrasing the model hasn't seen does work. In this experiment SFT trains on word-problem phrasings 0 and 1 only (`"phrasings": [0, 1]`), then GRPO and DPO practise phrasing 2 (`"tasks": ["word"], "phrasings": [2]`), and phrasing 3 stays held out:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/reasoning_split_dark.png">
-  <img alt="Grouped bar chart for three CPU models on 500 held-out problems per group. Word problems in phrasing 2, which GRPO and DPO practise: SFT 31%, after GRPO 98%, after DPO 95%. Word problems in phrasing 3, never trained on: SFT 49%, after GRPO 33%, after DPO 23%. Arithmetic: 100%, 100% and 97%." src="docs/figures/reasoning_split.png">
+  <img alt="Grouped bar chart for three CPU models on 500 held-out problems per task (the arithmetic bars average add, sub, mul and div). Word problems in phrasing 2, which GRPO and DPO practise: SFT 31%, after GRPO 98%, after DPO 95%. Word problems in phrasing 3, never trained on: SFT 49%, after GRPO 33%, after DPO 23%. Arithmetic: 100%, 100% and 97%." src="docs/figures/reasoning_split.png">
 </picture>
 
 - **GRPO learns the new phrasing from rewards alone:** 31% → 98% on held-out numbers, with the arithmetic untouched. Its reward rose from 80% (averaged over the first 25 steps) to 98% by step 50.
-- **The phrasing nothing trained on gets worse:** 49% → 33%. GRPO gets better at what it practises, not at reading wording in general. (After the first reasoning model's GRPO run the held-out phrasing improved instead, 22% → 34%, so this varies from run to run.)
+- **The phrasing nothing trained on gets worse:** 49% → 33%. GRPO gets better at what it practises, not at reading wording in general. (The first reasoning model's GRPO run improved the held-out phrasing instead, 22% → 34%; it started from SFT on all three training phrasings and practised all five math tasks, so the two runs don't show which outcome is typical.)
 - **DPO also learns phrasing 2** (95%), but costs some arithmetic (addition 100% → 92%, division 99% → 94%) and more of phrasing 3 (23%).
 
-`configs/reasoning/phrasing_split/` reproduces the experiment, and `python -m charlm eval --tasks word --phrasing 2` asks the held-out word problems in a given phrasing. The Colab configs now use the same split.
+`configs/reasoning/phrasing_split/` reproduces the experiment (its models are not in the repository, only their metrics), and `--phrasing` asks the held-out word problems in a given phrasing, e.g. `python -m charlm eval --model checkpoints/example/sft_reasoning.pt --tasks word --phrasing 2`. The Colab configs now use the same split.
 
 ## Using it as a library
 

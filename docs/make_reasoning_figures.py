@@ -9,6 +9,12 @@ their metrics (checkpoints/example/experiments/); train them first to rerun the 
     python -m charlm sft  --config configs/reasoning/sft_plain.json
     python -m charlm grpo --config configs/reasoning/grpo_plain.json
 
+Neither are the models of the phrasing-split experiment (configs/reasoning/phrasing_split/):
+
+    python -m charlm sft  --config configs/reasoning/phrasing_split/sft.json
+    python -m charlm grpo --config configs/reasoning/phrasing_split/grpo.json
+    python -m charlm dpo  --config configs/reasoning/phrasing_split/dpo.json
+
 The evaluation (500 held-out prompts per task, a few minutes per model on a CPU) is saved to
 checkpoints/example/experiments/reasoning_eval.json and reused on later runs; delete it to evaluate again.
 """
@@ -278,7 +284,10 @@ def phrasing_split(label):
         import random
         from charlm import evaluate_tasks, load_checkpoint
         from charlm.tasks import ITEMS, NAMES, WORD_TEMPLATES, Example
-        model, tokenizer, _ = load_checkpoint(os.path.join(EXAMPLE, f'{dict(SPLIT)[label]}.pt'))
+        path = os.path.join(EXAMPLE, f'{dict(SPLIT)[label]}.pt')
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{path} is missing; train it first (see the top of this file)")
+        model, tokenizer, _ = load_checkpoint(path)
         held_out = eval_examples(['word'])
         rng = random.Random(0)
         op_of = lambda e: e.reasoning.split(':')[0].strip('0123456789')
@@ -460,13 +469,13 @@ def word_figure(t):
 
 
 def split_figure(t):
-    """ the phrasing-split experiment: what GRPO and DPO practise gets better, what they don't gets worse """
+    """ the phrasing-split experiment: GRPO and DPO learn the phrasing they practise, the held-out one gets worse """
     results = [(label, phrasing_split(label)) for label, _ in SPLIT]
     groups = [('phrasing 2', 'word problems, phrasing 2\n(GRPO and DPO practise it)'),
               ('phrasing 3', 'word problems, phrasing 3\n(never trained on)'),
               ('arithmetic', 'arithmetic\n(add, sub, mul, div)')]
-    fig, (ax,) = new_figure(t, 'GRPO and DPO get better at what they practise, and worse at what they don\'t',
-                            'The CPU reasoning model, 500 held-out problems per group. SFT trained on word-problem '
+    fig, (ax,) = new_figure(t, 'GRPO and DPO learn the phrasing they practise; the held-out one gets worse',
+                            'The CPU reasoning model, 500 held-out problems per task. SFT trained on word-problem '
                             'phrasings 0 and 1 only.', height=3.8, top=0.72)
     fig.subplots_adjust(right=0.97, bottom=0.16)
     legend(fig, t, [label for label, _ in results], y=0.85, kind='bar')
