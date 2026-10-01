@@ -44,6 +44,9 @@ class DPOConfig(TrainConfig):
     # whether the chosen replies to math tasks include the step-by-step reasoning; None = when the model has the
     # reasoning tokens (i.e. it was fine-tuned with reasoning=true)
     reasoning: Optional[bool] = None
+    # which training phrasings of word problems to train on (0, 1, 2; None = all three); evaluation always uses the
+    # held-out fourth one
+    phrasings: Optional[List[int]] = None
     n_pairs: int = 4000  # pairs to build when data_path is None
     samples_per_prompt: int = 4  # replies sampled per prompt when looking for a wrong one
     sample_temperature: float = 1.0
@@ -150,7 +153,7 @@ def dpo(cfg):
     ref_model.eval().requires_grad_(False)
     scaler = setup_precision(cfg, device, model, ref_model)
     reasoning = tokenizer.has_reasoning_tokens if cfg.reasoning is None else cfg.reasoning
-    suite = TaskSuite(load_text(cfg.corpus_path))
+    suite = TaskSuite(load_text(cfg.corpus_path), phrasings=cfg.phrasings)
 
     pairs_path = os.path.splitext(cfg.out_path)[0] + '.pairs.jsonl'
     resuming = cfg.resume and os.path.exists(state_path(cfg.out_path))

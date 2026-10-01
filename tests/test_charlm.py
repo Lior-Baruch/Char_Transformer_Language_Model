@@ -676,3 +676,23 @@ def test_memory_settings_may_change_on_resume_and_cut_off_metric_rows_are_droppe
     path.write_text('{"step": 0, "acc": 0.1}\n{"step": 5, "acc": 0.2}\n{"step": 10, "ac')
     MetricsLogger(str(path), append=True, keep_until=5).log(10, acc=0.3)
     assert [json.loads(line)['step'] for line in open(path)] == [0, 5, 10]
+
+
+def test_word_problem_phrasings_can_be_split_between_stages():
+    import re
+    from charlm.tasks import WORD_TEMPLATES
+    text = open(CORPUS).read()
+    pattern = lambda t: re.compile(re.sub(r'\\{[a-z]\\}', '.+', re.escape(t)) + '$')
+    third = [pattern(ts[2]) for ts in WORD_TEMPLATES.values()]
+    others = [pattern(t) for ts in WORD_TEMPLATES.values() for t in ts[:2]]
+    train = TaskSuite(text, phrasings=[2]).sample(200, ['word'], 'train', seed=3)
+    assert all(any(p.match(e.prompt) for p in third) for e in train)
+    assert not any(p.match(e.prompt) for p in others for e in train)
+    # the default uses all three training phrasings, and evaluation never depends on the choice
+    assert [e.prompt for e in TaskSuite(text).sample(100, ['word'], seed=4)] == \
+        [e.prompt for e in TaskSuite(text, phrasings=[0, 1, 2]).sample(100, ['word'], seed=4)]
+    assert [e.prompt for e in TaskSuite(text, phrasings=[0]).eval_set(20, ['word'])] == \
+        [e.prompt for e in TaskSuite(text).eval_set(20, ['word'])]
+    for bad in ([], [3], [0, 5]):
+        with pytest.raises(ValueError, match='phrasings'):
+            TaskSuite(text, phrasings=bad)

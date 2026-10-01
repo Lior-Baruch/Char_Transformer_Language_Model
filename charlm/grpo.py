@@ -35,6 +35,9 @@ class GRPOConfig(TrainConfig):
     out_path: str = "checkpoints/grpo.pt"
     corpus_path: str = "data/input.txt"
     tasks: List[str] = field(default_factory=lambda: list(VERIFIABLE_TASKS))
+    # which training phrasings of word problems to train on (0, 1, 2; None = all three); evaluation always uses the
+    # held-out fourth one
+    phrasings: Optional[List[int]] = None
     batch_size: int = 16  # prompts per step
     group_size: int = 8  # replies sampled per prompt
     temperature: float = 1.0  # sampling temperature for the replies
@@ -93,7 +96,7 @@ def grpo(cfg):
                          "log-probabilities can't be compared")
     ref_model.eval().requires_grad_(False)
     scaler = setup_precision(cfg, device, model, ref_model)
-    suite = TaskSuite(load_text(cfg.corpus_path))
+    suite = TaskSuite(load_text(cfg.corpus_path), phrasings=cfg.phrasings)
     eval_set = suite.eval_set(cfg.eval_per_task, eval_tasks(cfg.tasks)) if cfg.eval_per_task else []
     print(f"device {device} | {cfg.batch_size} prompts x {cfg.group_size} replies per step | "
           f"{len(eval_set)} eval prompts")

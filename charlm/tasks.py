@@ -91,9 +91,16 @@ class TaskSuite:
     """ generates task examples; the train/eval split is fixed by split_seed """
 
     def __init__(self, text, split_seed=0, eval_fraction=0.2, min_word_len=3, max_word_len=12, max_number=99,
-                 max_operand=999):
+                 max_operand=999, phrasings=None):
+        """ phrasings: which of the training phrasings of word problems (0, 1, 2) the train split uses; None = all
+        three. E.g. SFT on [0, 1] and RL on [2] gives RL a phrasing the SFT model never saw. The eval split always
+        uses the held-out fourth phrasing """
         if not 0 < eval_fraction < 1:
             raise ValueError(f"eval_fraction must be between 0 and 1, got {eval_fraction}")
+        n_train_phrasings = len(next(iter(WORD_TEMPLATES.values()))) - 1
+        self.phrasings = list(range(n_train_phrasings)) if phrasings is None else list(phrasings)
+        if not self.phrasings or not set(self.phrasings) <= set(range(n_train_phrasings)):
+            raise ValueError(f"phrasings must be a non-empty list of 0..{n_train_phrasings - 1}, got {phrasings}")
         self.split_seed, self.eval_fraction, self.max_operand = split_seed, eval_fraction, max_operand
         rng = random.Random(split_seed)
         words = sorted({w for w in re.findall(r"[a-z]+", text.lower()) if min_word_len <= len(w) <= max_word_len})
@@ -179,7 +186,7 @@ class TaskSuite:
     def _word_problem(self, rng, split):
         op = rng.choice('+-*/')
         templates = WORD_TEMPLATES[op]
-        template = templates[-1] if split == 'eval' else rng.choice(templates[:-1])
+        template = templates[-1] if split == 'eval' else templates[rng.choice(self.phrasings)]
 
         def draw():  # small numbers keep the prompt, the trace and the answer within a 128-character context
             if op == '+':
